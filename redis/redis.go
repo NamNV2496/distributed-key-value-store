@@ -154,9 +154,13 @@ func (rc *RedisClient) Set(ctx context.Context, key string, val any, expire time
 		return fmt.Errorf("failed to marshal command: %w", err)
 	}
 
-	// Append to Raft log
-	if err := rc.raftNode.AppendEntry(data); err != nil {
-		return fmt.Errorf("failed to append entry: %w", err)
+	// Propose to Raft log and wait for commit.
+	index, err := rc.raftNode.Propose(data)
+	if err != nil {
+		return fmt.Errorf("failed to propose entry: %w", err)
+	}
+	if err := rc.raftNode.WaitCommit(ctx, index); err != nil {
+		return fmt.Errorf("failed to commit entry: %w", err)
 	}
 
 	return nil
@@ -202,9 +206,13 @@ func (rc *RedisClient) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("failed to marshal command: %w", err)
 	}
 
-	// Append to Raft log
-	if err := rc.raftNode.AppendEntry(data); err != nil {
-		return fmt.Errorf("failed to append entry: %w", err)
+	// Propose to Raft log and wait for commit.
+	index, err := rc.raftNode.Propose(data)
+	if err != nil {
+		return fmt.Errorf("failed to propose entry: %w", err)
+	}
+	if err := rc.raftNode.WaitCommit(ctx, index); err != nil {
+		return fmt.Errorf("failed to commit entry: %w", err)
 	}
 
 	return nil

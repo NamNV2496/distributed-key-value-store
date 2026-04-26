@@ -3,17 +3,25 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+// Command is the canonical write operation sent through the Raft log.
+type Command struct {
+	Op    string `json:"op"`
+	Key   string `json:"key"`
+	Value string `json:"value,omitempty"`
+	TTLMs int64  `json:"ttl_ms,omitempty"`
+}
 
 var ServiceCmd = &cobra.Command{
 	Use:   "service",
@@ -36,8 +44,6 @@ type ServiceConfig struct {
 type ServiceServer struct {
 	config     ServiceConfig
 	httpServer *http.Server
-	data       map[string]string
-	mu         sync.RWMutex
 }
 
 func StartService() {
@@ -132,7 +138,6 @@ func StartService() {
 func NewServiceServer(config ServiceConfig) (*ServiceServer, error) {
 	s := &ServiceServer{
 		config: config,
-		data:   make(map[string]string),
 	}
 	return s, nil
 }
@@ -219,21 +224,23 @@ func (s *ServiceServer) handleRedisSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create log entry data
-	data, _ := json.Marshal(req)
-	entry := LogEntry{Data: data}
-	entryData, _ := json.Marshal(entry)
+	cmd := Command{Op: "set", Key: req.Key, Value: req.Value, TTLMs: req.ExpireMs}
+	data, _ := json.Marshal(cmd)
 
-	// Forward to leader
-	resp, err := s.forwardToLeader("/raft/append", entryData)
+	resp, err := s.forwardToLeader("/raft/command", data)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, string(body), resp.StatusCode)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	io.Copy(w, resp.Body)
 }
 
 // handleRedisGet handles the /redis/get endpoint
@@ -249,13 +256,16 @@ func (s *ServiceServer) handleRedisGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read from local state (in real implementation, would read from leader or use readIndex)
-	s.mu.RLock()
-	value, found := s.data[req.Key]
-	s.mu.RUnlock()
+	data, _ := json.Marshal(req)
+	resp, err := s.forwardToLeader("/raft/get", data)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(GetResponse{Value: value, Found: found})
+	io.Copy(w, resp.Body)
 }
 
 // handleRedisDelete handles the /redis/del endpoint
@@ -271,21 +281,23 @@ func (s *ServiceServer) handleRedisDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Create log entry data
-	data, _ := json.Marshal(req)
-	entry := LogEntry{Data: data}
-	entryData, _ := json.Marshal(entry)
+	cmd := Command{Op: "del", Key: req.Key}
+	data, _ := json.Marshal(cmd)
 
-	// Forward to leader
-	resp, err := s.forwardToLeader("/raft/append", entryData)
+	resp, err := s.forwardToLeader("/raft/command", data)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
 		return
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, string(body), resp.StatusCode)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	io.Copy(w, resp.Body)
 }
 
 // handleStatus handles the /status endpoint

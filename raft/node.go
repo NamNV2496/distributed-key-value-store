@@ -3,7 +3,9 @@ package raft
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -56,6 +58,9 @@ type RaftNode struct {
 	stopChan  chan struct{}
 	stopped   bool
 
+	// HTTP client used only for health-check pings (not Raft RPCs).
+	healthClient *http.Client
+
 	// Callbacks
 	onStateChange    func(role NodeRole)
 	onLogEntriesRead func(entries []wal.LogEntry)
@@ -102,6 +107,7 @@ func NewRaftNode(cfg Config) (*RaftNode, error) {
 		matchIndex:       make(map[string]int64),
 		applyChan:        make(chan wal.LogEntry, 100),
 		stopChan:         make(chan struct{}),
+		healthClient:     &http.Client{Timeout: 300 * time.Millisecond},
 		onStateChange:    cfg.OnStateChange,
 		onLogEntriesRead: cfg.OnLogEntriesRead,
 	}
@@ -119,8 +125,144 @@ func NewRaftNode(cfg Config) (*RaftNode, error) {
 
 // Start starts the Raft node
 func (rn *RaftNode) Start() {
+	rn.mu.Lock()
+	rn.electionTimer = time.NewTimer(rn.electionTimeout)
+	singleNode := len(rn.clientMap) == 0
+	rn.mu.Unlock()
 	go rn.run()
 	go rn.applyLogEntries()
+	go rn.runHealthChecker()
+
+	// Single-node cluster: skip the election timeout and become leader now.
+	if singleNode {
+		go rn.campaign(false)
+	}
+}
+
+// runHealthChecker periodically pings every peer and, when the current leader
+// becomes unreachable for 2 consecutive checks, immediately triggers a new
+// election rather than waiting for the election timer to fire.
+//
+// Once a node is confirmed dead it is skipped on every normal tick; only a
+// recovery probe (every 2 s) is sent so we detect when it comes back.
+func (rn *RaftNode) runHealthChecker() {
+	const (
+		failThreshold    = 2
+		recoveryInterval = 2 * time.Second
+		tickInterval     = 200 * time.Millisecond
+	)
+
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
+	fails            := make(map[string]int)
+	dead             := make(map[string]bool)
+	lastRecoveryPing := make(map[string]time.Time)
+
+	for {
+		select {
+		case <-rn.stopChan:
+			return
+		case <-ticker.C:
+			rn.mu.RLock()
+			role     := rn.role
+			leaderId := rn.leaderId
+			peers    := make(map[string]string, len(rn.clientMap))
+			for id := range rn.clientMap {
+				peers[id] = rn.peers[id]
+			}
+			rn.mu.RUnlock()
+
+			for nodeID, url := range peers {
+				if dead[nodeID] {
+					// Skip until the recovery window opens.
+					if time.Since(lastRecoveryPing[nodeID]) < recoveryInterval {
+						continue
+					}
+					lastRecoveryPing[nodeID] = time.Now()
+					if rn.pingNode(url) {
+						log.Printf("[health][%s] node %s recovered", rn.nodeID, nodeID)
+						dead[nodeID] = false
+						fails[nodeID] = 0
+					}
+					continue
+				}
+
+				// Normal liveness check.
+				if rn.pingNode(url) {
+					fails[nodeID] = 0
+					continue
+				}
+
+				fails[nodeID]++
+				log.Printf("[health][%s] node %s unreachable (attempt %d/%d)",
+					rn.nodeID, nodeID, fails[nodeID], failThreshold)
+
+				if fails[nodeID] >= failThreshold {
+					dead[nodeID] = true
+					lastRecoveryPing[nodeID] = time.Now()
+					log.Printf("[health][%s] node %s marked DEAD", rn.nodeID, nodeID)
+
+					if nodeID == leaderId && role != LeaderRole {
+						log.Printf("[health][%s] leader %s is dead — triggering re-election", rn.nodeID, nodeID)
+						rn.mu.Lock()
+						if rn.leaderId == nodeID {
+							rn.leaderId = ""
+						}
+						rn.mu.Unlock()
+						// Random jitter (0-50 ms) to reduce split-vote probability.
+						delay := time.Duration(rand.Intn(50)) * time.Millisecond
+						time.AfterFunc(delay, func() { go rn.campaign(false) })
+					}
+				}
+			}
+
+			// If every known peer is unreachable this node is effectively alone —
+			// promote to leader immediately without waiting for an election timeout.
+			if role != LeaderRole && len(peers) > 0 {
+				allDead := true
+				for id := range peers {
+					if !dead[id] {
+						allDead = false
+						break
+					}
+				}
+				if allDead {
+					log.Printf("[health][%s] all peers unreachable — promoting to leader", rn.nodeID)
+					rn.mu.Lock()
+					if rn.role != LeaderRole {
+						rn.state.SetCurrentTerm(rn.state.CurrentTerm() + 1)
+						rn.state.SetVotedFor(rn.nodeID)
+						rn.role = LeaderRole
+						rn.leaderId = rn.nodeID
+						if rn.onStateChange != nil {
+							rn.onStateChange(rn.role)
+						}
+						rn.mu.Unlock()
+						go rn.sendHeartbeats()
+					} else {
+						rn.mu.Unlock()
+					}
+				}
+			}
+		}
+	}
+}
+
+// pingNode sends a GET /health request and returns true if the node is alive.
+func (rn *RaftNode) pingNode(url string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url+"/health", nil)
+	if err != nil {
+		return false
+	}
+	resp, err := rn.healthClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 // Stop stops the Raft node
@@ -133,37 +275,19 @@ func (rn *RaftNode) Stop() {
 }
 
 func (rn *RaftNode) run() {
-	rn.mu.Lock()
-	hbInterval := rn.heartbeatTimeout
-	rn.mu.Unlock()
-	heartbeatTicker := time.NewTicker(hbInterval)
-	defer heartbeatTicker.Stop()
-
 	for {
 		select {
-		case <-heartbeatTicker.C:
-			rn.mu.Lock()
-			isLeader := rn.role == LeaderRole
-			rn.mu.Unlock()
-			if isLeader {
-				go rn.sendHeartbeats()
-			}
 		case <-rn.electionTimer.C:
 			rn.mu.Lock()
 			role := rn.role
-			leaderId := rn.leaderId
+			if role != LeaderRole {
+				// Clear stale leader hint so the next election isn't blocked.
+				rn.leaderId = ""
+			}
+			rn.resetElectionTimer()
 			rn.mu.Unlock()
-			// If there's already a known leader, don't start an election
-			if leaderId != "" {
-				rn.mu.Lock()
-				rn.resetElectionTimer()
-				rn.mu.Unlock()
-			} else if role != LeaderRole {
+			if role != LeaderRole {
 				go rn.campaign(false)
-			} else {
-				rn.mu.Lock()
-				rn.resetElectionTimer()
-				rn.mu.Unlock()
 			}
 		case <-rn.stopChan:
 			return
@@ -171,18 +295,111 @@ func (rn *RaftNode) run() {
 	}
 }
 
-// AppendEntry appends a new entry to the log
-func (rn *RaftNode) AppendEntry(data []byte) error {
-	rn.mu.RLock()
+// Propose appends a command to the leader's log, replicates it immediately,
+// and returns the log index so the caller can wait for it to be committed.
+func (rn *RaftNode) Propose(data []byte) (int64, error) {
+	rn.mu.Lock()
 	if rn.role != LeaderRole {
-		rn.mu.RUnlock()
-		return fmt.Errorf("not leader")
+		rn.mu.Unlock()
+		return -1, fmt.Errorf("not leader")
 	}
 	term := rn.state.CurrentTerm()
-	rn.mu.RUnlock()
-
 	index := int64(rn.log.Len())
-	return rn.log.Append(term, index, data)
+	if err := rn.log.Append(term, index, data); err != nil {
+		rn.mu.Unlock()
+		return -1, err
+	}
+	rn.mu.Unlock()
+
+	// Replicate immediately rather than waiting for the next heartbeat.
+	rn.sendAppendEntries(term, false)
+	return index, nil
+}
+
+// AddPeer adds a new node to the cluster at runtime. Safe to call concurrently.
+func (rn *RaftNode) AddPeer(nodeID, addr string) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if _, exists := rn.clientMap[nodeID]; exists {
+		return // already known
+	}
+	rn.peers[nodeID] = addr
+	rn.clientMap[nodeID] = NewRaftRPCClient(addr)
+	if rn.role == LeaderRole {
+		// Start from the beginning so the new node receives the full log.
+		rn.nextIndex[nodeID] = 0
+		rn.matchIndex[nodeID] = -1
+	}
+	log.Printf("[%s] added peer %s at %s", rn.nodeID, nodeID, addr)
+}
+
+// ReplicateTo immediately sends the full log to a specific peer.
+// Called right after a new node joins so it doesn't have to wait for the
+// next heartbeat to start receiving entries.
+func (rn *RaftNode) ReplicateTo(nodeID string) {
+	rn.mu.RLock()
+	client, ok := rn.clientMap[nodeID]
+	term := rn.state.CurrentTerm()
+	rn.mu.RUnlock()
+	if !ok {
+		return
+	}
+	go rn.sendAppendEntriesTo(nodeID, client, term, false)
+}
+
+// GetPeers returns a snapshot of current peer addresses (excludes self).
+func (rn *RaftNode) GetPeers() map[string]string {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	out := make(map[string]string, len(rn.clientMap))
+	for id := range rn.clientMap {
+		out[id] = rn.peers[id]
+	}
+	return out
+}
+
+// WaitCommit blocks until commitIndex >= index or the context is done.
+func (rn *RaftNode) WaitCommit(ctx context.Context, index int64) error {
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-rn.stopChan:
+			return fmt.Errorf("node stopped")
+		case <-ticker.C:
+			rn.mu.RLock()
+			committed := rn.commitIndex >= index
+			rn.mu.RUnlock()
+			if committed {
+				return nil
+			}
+		}
+	}
+}
+
+// advanceCommitIndex advances commitIndex to the highest index replicated
+// to a quorum of nodes. Caller must hold rn.mu (write lock).
+func (rn *RaftNode) advanceCommitIndex() {
+	n := int64(rn.log.Len() - 1)
+	for n > rn.commitIndex {
+		count := 1 // leader itself
+		for _, mi := range rn.matchIndex {
+			if mi >= n {
+				count++
+			}
+		}
+		if count >= rn.quorum() {
+			entry := rn.log.GetEntry(n)
+			if entry != nil && entry.Term == rn.state.CurrentTerm() {
+				rn.commitIndex = n
+				return
+			}
+		}
+		n--
+	}
 }
 
 // GetLeaderID returns the current leader ID
@@ -227,11 +444,16 @@ func (rn *RaftNode) RequestVote(ctx context.Context, args *RequestVoteArgs) (*Re
 		return reply, nil
 	}
 
-	// If candidate's term is greater, update term and reset voted for
+	// If candidate's term is greater, step down and clear stale leader hint.
 	if args.Term > currentTerm {
 		rn.state.SetCurrentTerm(args.Term)
 		currentTerm = args.Term
 		reply.Term = currentTerm
+		rn.role = FollowerRole
+		rn.leaderId = ""
+		if rn.onStateChange != nil {
+			rn.onStateChange(rn.role)
+		}
 	}
 
 	// Check if already voted for someone else
@@ -328,160 +550,17 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, args *AppendEntriesArgs) 
 	return reply, nil
 }
 
-// runElectionTimer runs the election timer
-func (rn *RaftNode) runElectionTimer() {
-	for {
-		select {
-		case <-rn.stopChan:
-			return
-		default:
-		}
-
-		rn.mu.Lock()
-		if rn.electionTimer != nil {
-			rn.electionTimer.Stop()
-		}
-		timeout := rn.electionTimeout
-		rn.mu.Unlock()
-
-		rn.mu.Lock()
-		rn.electionTimer = time.AfterFunc(timeout, func() {
-			rn.startElection()
-		})
-		rn.mu.Unlock()
-
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-// resetElectionTimer resets the election timer
+// resetElectionTimer resets the election timer. Caller must hold rn.mu.
 func (rn *RaftNode) resetElectionTimer() {
 	if rn.electionTimer != nil {
 		rn.electionTimer.Stop()
-	}
-	rn.electionTimer = time.AfterFunc(rn.electionTimeout, func() {
-		rn.startElection()
-	})
-}
-
-// startElection starts a leader election
-func (rn *RaftNode) startElection() {
-	rn.mu.Lock()
-
-	if rn.stopped {
-		rn.mu.Unlock()
-		return
-	}
-
-	newTerm := rn.state.CurrentTerm() + 1
-	rn.state.SetCurrentTerm(newTerm)
-	rn.role = CandidateRole
-	rn.leaderId = ""
-	rn.state.SetVotedFor(rn.nodeID)
-
-	lastEntry := rn.log.LastEntry()
-	var lastLogIndex, lastLogTerm int64
-	if lastEntry != nil {
-		lastLogIndex = lastEntry.Index
-		lastLogTerm = lastEntry.Term
-	} else {
-		lastLogIndex = -1
-		lastLogTerm = 0
-	}
-
-	if rn.onStateChange != nil {
-		rn.onStateChange(rn.role)
-	}
-
-	rn.mu.Unlock()
-
-	// Request votes from peers
-	rn.requestVotes(newTerm, lastLogIndex, lastLogTerm)
-}
-
-// requestVotes requests votes from all peers
-func (rn *RaftNode) requestVotes(term, lastLogIndex, lastLogTerm int64) {
-	var wg sync.WaitGroup
-	votes := 1 // Vote for self
-	votesMu := sync.Mutex{}
-
-	for peerID, client := range rn.clientMap {
-		wg.Add(1)
-		go func(id string, cli RaftRPCClient) {
-			defer wg.Done()
-
-			args := &RequestVoteArgs{
-				Term:         term,
-				CandidateId:  rn.nodeID,
-				LastLogIndex: lastLogIndex,
-				LastLogTerm:  lastLogTerm,
-			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			reply, err := cli.RequestVote(ctx, args)
-			if err != nil {
-				return
-			}
-
-			rn.mu.Lock()
-			if reply.Term > rn.state.CurrentTerm() {
-				rn.state.SetCurrentTerm(reply.Term)
-				rn.role = FollowerRole
-				rn.leaderId = ""
-				if rn.onStateChange != nil {
-					rn.onStateChange(rn.role)
-				}
-				rn.mu.Unlock()
-				return
-			}
-			rn.mu.Unlock()
-
-			if reply.VoteGranted {
-				votesMu.Lock()
-				votes++
-				votesMu.Unlock()
-			}
-		}(peerID, client)
-	}
-
-	wg.Wait()
-
-	// Check if we have majority
-	// Cluster size = peers + 1 (self)
-	clusterSize := len(rn.peers) + 1
-	majorityNeeded := clusterSize/2 + 1
-	votesMu.Lock()
-	hasVotes := votes >= majorityNeeded
-	votesMu.Unlock()
-
-	if hasVotes {
-		rn.mu.Lock()
-		if rn.role == CandidateRole && rn.state.CurrentTerm() == term {
-			rn.role = LeaderRole
-			rn.leaderId = rn.nodeID
-
-			// Initialize leader state
-			for peerID := range rn.peers {
-				if peerID != rn.nodeID {
-					rn.nextIndex[peerID] = int64(rn.log.Len())
-					rn.matchIndex[peerID] = -1
-				}
-			}
-
-			if rn.onStateChange != nil {
-				rn.onStateChange(rn.role)
-			}
-
-			rn.mu.Unlock()
-
-			// Start sending heartbeats
-			go rn.sendHeartbeats()
-		} else {
-			rn.mu.Unlock()
+		// Drain any pending tick so run() doesn't see a stale fire.
+		select {
+		case <-rn.electionTimer.C:
+		default:
 		}
 	}
+	rn.electionTimer = time.NewTimer(rn.electionTimeout)
 }
 
 // sendHeartbeats sends heartbeats to all followers
@@ -579,8 +658,12 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, ter
 	}
 
 	if !reply.Success {
-		if reply.ConflictIndex > 0 {
-			rn.nextIndex[peerID] = reply.ConflictIndex - 1
+		// Use ConflictIndex as the new nextIndex so the leader retries from
+		// exactly where the follower diverges.  The >= 0 check also handles
+		// ConflictIndex==0 (completely empty new node), which the old "> 0"
+		// guard skipped — leaving nextIndex stuck and replication stalled.
+		if reply.ConflictIndex >= 0 {
+			rn.nextIndex[peerID] = reply.ConflictIndex
 			if rn.nextIndex[peerID] < 0 {
 				rn.nextIndex[peerID] = 0
 			}
@@ -588,15 +671,16 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, ter
 		return
 	}
 
-	// Success: update nextIndex and matchIndex
+	// Success: update nextIndex and matchIndex, then try to advance commitIndex.
 	if len(entries) > 0 {
 		lastIndex := entries[len(entries)-1].Index
 		rn.nextIndex[peerID] = lastIndex + 1
 		rn.matchIndex[peerID] = lastIndex
+		rn.advanceCommitIndex()
 	}
 }
 
-// applyLogEntries applies committed log entries to the state machine
+// applyLogEntries applies committed log entries to the state machine.
 func (rn *RaftNode) applyLogEntries() {
 	for {
 		select {
@@ -605,21 +689,25 @@ func (rn *RaftNode) applyLogEntries() {
 		default:
 		}
 
-		rn.mu.RLock()
-		if rn.commitIndex > rn.lastApplied {
-			for i := rn.lastApplied + 1; i <= rn.commitIndex; i++ {
-				entry := rn.log.GetEntry(i)
-				if entry != nil {
-					rn.applyChan <- wal.LogEntry{
-						Term:  entry.Term,
-						Index: entry.Index,
-						Data:  entry.Data,
-					}
-					rn.lastApplied = i
-				}
+		// Collect entries to apply under the write lock, then send without holding it.
+		rn.mu.Lock()
+		var toApply []wal.LogEntry
+		for rn.commitIndex > rn.lastApplied {
+			rn.lastApplied++
+			entry := rn.log.GetEntry(rn.lastApplied)
+			if entry != nil {
+				toApply = append(toApply, wal.LogEntry{
+					Term:  entry.Term,
+					Index: entry.Index,
+					Data:  entry.Data,
+				})
 			}
 		}
-		rn.mu.RUnlock()
+		rn.mu.Unlock()
+
+		for _, e := range toApply {
+			rn.applyChan <- e
+		}
 
 		time.Sleep(10 * time.Millisecond)
 	}

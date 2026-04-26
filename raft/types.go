@@ -39,6 +39,7 @@ type AppendEntriesArgs struct {
 // AppendEntriesReply represents AppendEntries RPC reply
 type AppendEntriesReply struct {
 	Term          int64
+	NodeId        string
 	Success       bool
 	ConflictIndex int64
 }

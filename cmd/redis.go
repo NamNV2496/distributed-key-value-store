@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -46,7 +48,8 @@ type RaftRedisServer struct {
 	config     ServerConfig
 	raftNode   *raft.RaftNode
 	httpServer *http.Server
-	mu         sync.RWMutex
+	kvData     map[string]string
+	kvMu       sync.RWMutex
 }
 
 func StartRedisServer() {
@@ -111,6 +114,8 @@ func StartRedisServer() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/raft/vote", server.handleRequestVote)
 		mux.HandleFunc("/raft/append", server.handleAppendEntries)
+		mux.HandleFunc("/raft/command", server.handleCommand)
+		mux.HandleFunc("/raft/get", server.handleGet)
 		mux.HandleFunc("/health", server.handleHealth)
 		mux.HandleFunc("/status", server.handleStatus)
 
@@ -139,6 +144,7 @@ func StartRedisServer() {
 func NewRaftRedisServer(config ServerConfig) (*RaftRedisServer, error) {
 	s := &RaftRedisServer{
 		config: config,
+		kvData: make(map[string]string),
 	}
 
 	// Create Raft node
@@ -171,7 +177,28 @@ func NewRaftRedisServer(config ServerConfig) (*RaftRedisServer, error) {
 	// Start the Raft node
 	raftNode.Start()
 
+	// Consume committed log entries and apply them to the local KV store.
+	go s.runApplyLoop()
+
 	return s, nil
+}
+
+// runApplyLoop reads committed entries from the Raft node and applies them.
+func (s *RaftRedisServer) runApplyLoop() {
+	for entry := range s.raftNode.ApplyChan() {
+		var cmd Command
+		if err := json.Unmarshal(entry.Data, &cmd); err != nil {
+			continue
+		}
+		s.kvMu.Lock()
+		switch cmd.Op {
+		case "set":
+			s.kvData[cmd.Key] = cmd.Value
+		case "del":
+			delete(s.kvData, cmd.Key)
+		}
+		s.kvMu.Unlock()
+	}
 }
 
 // Stop gracefully stops the server
@@ -238,6 +265,63 @@ func (s *RaftRedisServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+}
+
+// handleCommand is the client-facing write endpoint. The service forwards
+// SET/DEL commands here; the leader appends, replicates, and waits for commit.
+func (s *RaftRedisServer) handleCommand(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	index, err := s.raftNode.Propose(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	if err := s.raftNode.WaitCommit(ctx, index); err != nil {
+		http.Error(w, "commit timeout: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"node_id": s.config.NodeID,
+		"index":   index,
+	})
+}
+
+// handleGet is the client-facing read endpoint; reads from the local KV store.
+func (s *RaftRedisServer) handleGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.kvMu.RLock()
+	value, found := s.kvData[req.Key]
+	s.kvMu.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"node_id": s.config.NodeID,
+		"value":   value,
+		"found":   found,
+	})
 }
 
 // handleStatus handles the /status endpoint

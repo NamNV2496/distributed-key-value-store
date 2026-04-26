@@ -14,24 +14,44 @@ type VoteResponse struct {
 func (rn *RaftNode) campaign(preVote bool) {
 	rn.mu.Lock()
 
-	// If we somehow become leader already (e.g., concurrent campaign), bail out
 	if rn.role == LeaderRole {
 		rn.mu.Unlock()
 		return
 	}
 
-	var campaignTerm int64
-	if preVote {
-		// Pre-Vote uses term + 1 in request but doesn't persist or increment yet
-		campaignTerm = rn.state.CurrentTerm() + 1
-	} else {
-		// Become candidate - increment term, vote for self
+	// Single-node cluster: become leader immediately without entering Candidate state.
+	if len(rn.clientMap) == 0 {
+		if preVote {
+			rn.mu.Unlock()
+			rn.campaign(false)
+			return
+		}
 		rn.state.SetCurrentTerm(rn.state.CurrentTerm() + 1)
 		rn.state.SetVotedFor(rn.nodeID)
-		campaignTerm = rn.state.CurrentTerm()
+		rn.role = LeaderRole
+		rn.leaderId = rn.nodeID
+		if rn.onStateChange != nil {
+			rn.onStateChange(rn.role)
+		}
+		rn.mu.Unlock()
+		go rn.sendHeartbeats()
+		return
 	}
 
-	// Snapshot what we need from the locked state before releasing
+	var campaignTerm int64
+	if preVote {
+		campaignTerm = rn.state.CurrentTerm() + 1
+	} else {
+		rn.state.SetCurrentTerm(rn.state.CurrentTerm() + 1)
+		rn.state.SetVotedFor(rn.nodeID)
+		rn.role = CandidateRole
+		rn.leaderId = ""
+		campaignTerm = rn.state.CurrentTerm()
+		if rn.onStateChange != nil {
+			rn.onStateChange(rn.role)
+		}
+	}
+
 	var lastLogIndex, lastLogTerm int64
 	lastEntry := rn.log.LastEntry()
 	if lastEntry != nil {
@@ -42,37 +62,13 @@ func (rn *RaftNode) campaign(preVote bool) {
 		lastLogTerm = 0
 	}
 
-	peers := make([]string, 0, len(rn.peers))
-	for id := range rn.peers {
+	// Build peer list from clientMap so self is never included.
+	peers := make([]string, 0, len(rn.clientMap))
+	for id := range rn.clientMap {
 		peers = append(peers, id)
 	}
 	rn.mu.Unlock()
 
-	// Single node cluster - win immediately without any RPCs.
-	if len(peers) == 0 {
-		rn.mu.Lock()
-		if preVote {
-			rn.mu.Unlock()
-			rn.campaign(false) // prev-vote passed, now to the real election
-		} else {
-			rn.role = LeaderRole
-			rn.leaderId = rn.nodeID
-			// Initialize leader state
-			for peerID := range rn.peers {
-				if peerID != rn.nodeID {
-					rn.nextIndex[peerID] = int64(rn.log.Len())
-					rn.matchIndex[peerID] = -1
-				}
-			}
-			if rn.onStateChange != nil {
-				rn.onStateChange(rn.role)
-			}
-			rn.mu.Unlock()
-			// Start sending heartbeats
-			go rn.sendHeartbeats()
-		}
-		return
-	}
 	voteCh := make(chan VoteResponse, len(peers))
 	for _, peerID := range peers {
 		go func(peerID string) {
@@ -86,44 +82,25 @@ func (rn *RaftNode) campaign(preVote bool) {
 				LastLogTerm:  lastLogTerm,
 			}
 
-			var resp VoteResponse
-
-			client, ok := rn.clientMap[peerID]
-			if !ok {
-				resp = VoteResponse{VoteGranted: false}
-				voteCh <- resp
+			reply, err := rn.clientMap[peerID].RequestVote(ctx, &req)
+			if err != nil {
+				voteCh <- VoteResponse{VoteGranted: false}
 				return
 			}
-
-			if preVote {
-				// For pre-vote, we still use RequestVote but with term+1
-				// The server should handle this via handlePreVote logic
-				reply, err := client.RequestVote(ctx, &req)
-				if err != nil {
-					resp = VoteResponse{VoteGranted: false}
-				} else {
-					resp = VoteResponse{Term: reply.Term, VoteGranted: reply.VoteGranted}
-				}
-			} else {
-				reply, err := client.RequestVote(ctx, &req)
-				if err != nil {
-					resp = VoteResponse{VoteGranted: false}
-				} else {
-					resp = VoteResponse{Term: reply.Term, VoteGranted: reply.VoteGranted}
-				}
-			}
-			voteCh <- resp
+			voteCh <- VoteResponse{Term: reply.Term, VoteGranted: reply.VoteGranted}
 		}(peerID)
 	}
 
-	// Tally results. Start at 1 - we always vote for ourselves.
+	// Tally results. Start at 1 — we always vote for ourselves.
 	votes := 1
 	needed := rn.quorum()
 
 	for range peers {
 		resp := <-voteCh
 		rn.mu.Lock()
-		if preVote && rn.role != CandidateRole {
+
+		// Bail if role changed out from under us (e.g. another leader appeared).
+		if preVote && rn.role == LeaderRole {
 			rn.mu.Unlock()
 			return
 		}
@@ -131,6 +108,8 @@ func (rn *RaftNode) campaign(preVote bool) {
 			rn.mu.Unlock()
 			return
 		}
+
+		// Step down if we see a higher term.
 		if resp.Term > rn.state.CurrentTerm() {
 			rn.state.SetCurrentTerm(resp.Term)
 			rn.role = FollowerRole
@@ -141,7 +120,6 @@ func (rn *RaftNode) campaign(preVote bool) {
 			rn.mu.Unlock()
 			return
 		}
-
 		rn.mu.Unlock()
 
 		if resp.VoteGranted {
@@ -149,7 +127,6 @@ func (rn *RaftNode) campaign(preVote bool) {
 		}
 
 		if votes >= needed {
-			// Quorum reached - we won.
 			rn.mu.Lock()
 			if preVote {
 				rn.mu.Unlock()
@@ -157,11 +134,9 @@ func (rn *RaftNode) campaign(preVote bool) {
 			} else {
 				rn.role = LeaderRole
 				rn.leaderId = rn.nodeID
-				for peerID := range rn.peers {
-					if peerID != rn.nodeID {
-						rn.nextIndex[peerID] = int64(rn.log.Len())
-						rn.matchIndex[peerID] = -1
-					}
+				for peerID := range rn.clientMap {
+					rn.nextIndex[peerID] = int64(rn.log.Len())
+					rn.matchIndex[peerID] = -1
 				}
 				if rn.onStateChange != nil {
 					rn.onStateChange(rn.role)
@@ -173,7 +148,7 @@ func (rn *RaftNode) campaign(preVote bool) {
 		}
 	}
 
-	// Failed to reach quorum. Step back to follower and wait for the next timeout.
+	// Failed to reach quorum — step back to follower.
 	rn.mu.Lock()
 	if rn.role == CandidateRole {
 		rn.role = FollowerRole
@@ -199,15 +174,14 @@ func (rn *RaftNode) isLogUpToDate(candidateLastTerm, candidateLastIndex int64) b
 		myLastTerm = 0
 	}
 
-	// In case of different terms, whoever has higher term is up-to-date
 	if candidateLastTerm != myLastTerm {
 		return candidateLastTerm > myLastTerm
 	}
-	// Same term: whoever has more entries is up-to-date
 	return candidateLastIndex >= myLastIndex
 }
 
-// Returns the minimum votes needed to win: floor(N/2) + 1.
+// quorum returns the minimum votes needed to win: floor(N/2) + 1.
+// Uses clientMap (peers excluding self) so the cluster size is always correct.
 func (rn *RaftNode) quorum() int {
-	return (len(rn.peers)+1)/2 + 1
+	return (len(rn.clientMap)+1)/2 + 1
 }
