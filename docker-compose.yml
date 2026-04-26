@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # Raft consensus nodes (port 5000 inside container)
+  node1:
+    build: .
+    container_name: raft-redis-1
+    ports:
+      - "5001:5000"
+    environment:
+      - NODE=node1
+      - PORT=5000
+      - PEERS=node1=http://node1:5000,node2=http://node2:5000,node3=http://node3:5000
+      - LOGFILE=/data/raft.log
+      - STATEFILE=/data/raft.state
+    volumes:
+      - node1-data:/data
+    networks:
+      - raft-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["./raft-redis","redis"]
+
+  node2:
+    build: .
+    container_name: raft-redis-2
+    ports:
+      - "5002:5000"
+    environment:
+      - NODE=node2
+      - PORT=5000
+      - PEERS=node1=http://node1:5000,node2=http://node2:5000,node3=http://node3:5000
+      - LOGFILE=/data/raft.log
+      - STATEFILE=/data/raft.state
+    volumes:
+      - node2-data:/data
+    networks:
+      - raft-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["./raft-redis","redis"]
+
+  node3:
+    build: .
+    container_name: raft-redis-3
+    ports:
+      - "5003:5000"
+    environment:
+      - NODE=node3
+      - PORT=5000
+      - PEERS=node1=http://node1:5000,node2=http://node2:5000,node3=http://node3:5000
+      - LOGFILE=/data/raft.log
+      - STATEFILE=/data/raft.state
+    volumes:
+      - node3-data:/data
+    networks:
+      - raft-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["./raft-redis","redis"]
+
+  # REST API service nodes (port 8000 inside container)
+  # These find the Raft leader and forward Redis commands
+  service1:
+    build: .
+    container_name: raft-service-1
+    ports:
+      - "8001:8000"
+    environment:
+      - NODE=service1
+      - PORT=8000
+      - PEERS=node1=http://node1:5000,node2=http://node2:5000,node3=http://node3:5000
+      - DATAFILE=/data/service.data
+    volumes:
+      - service1-data:/data
+    networks:
+      - raft-network
+    depends_on:
+      - node1
+      - node2
+      - node3
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["./raft-redis","service"]
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  service1-data:
+  service2-data:
+
+networks:
+  raft-network:
+    driver: bridge
