@@ -16,6 +16,5 @@ func Execute() error {
 		Short: "A simple mock tool",
 	}
 	rootCmd.AddCommand(cmd.RedisCmd)
-	rootCmd.AddCommand(cmd.ServiceCmd)
 	return rootCmd.Execute()
 }

@@ -1,4 +1,4 @@
-package cmd
+package main
 
 import (
 	"encoding/json"
@@ -11,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/spf13/cobra"
 )
 
 // Command is the canonical write operation sent through the Raft log.
@@ -21,15 +19,6 @@ type Command struct {
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
 	TTLMs int64  `json:"ttl_ms,omitempty"`
-}
-
-var ServiceCmd = &cobra.Command{
-	Use:   "service",
-	Short: "Start REST API service with Raft client",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		StartService()
-		return nil
-	},
 }
 
 // ServiceConfig holds the service configuration
@@ -46,7 +35,7 @@ type ServiceServer struct {
 	httpServer *http.Server
 }
 
-func StartService() {
+func main() {
 	// Read from environment variables or use defaults
 	nodeID := getEnv("NODE", "service")
 	portStr := getEnv("PORT", "8000")
@@ -168,6 +157,13 @@ func (s *ServiceServer) findLeader() (leaderID string, leaderURL string, err err
 		}
 	}
 	return "", "", fmt.Errorf("no leader found")
+}
+
+func getEnv(key, defaultValue string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return defaultValue
 }
 
 // forwardToLeader forwards a request to the current leader

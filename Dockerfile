@@ -13,8 +13,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
+# Build main binary (for node1, node2, node3)
 RUN CGO_ENABLED=0 GOOS=linux go build -o /raft-redis .
+
+# Build the client service (example/client.go)
+RUN CGO_ENABLED=0 GOOS=linux go build -o /client-service ./example/client.go
 
 # Final stage
 FROM alpine:latest
@@ -23,9 +26,10 @@ RUN apk add --no-cache ca-certificates curl
 
 WORKDIR /app
 
-# Copy binary from builder
+# Copy both binaries from builder
 COPY --from=builder /raft-redis .
+COPY --from=builder /client-service .
 
-EXPOSE 5000 5001 5002
+EXPOSE 5000 8000
 
 CMD ["./raft-redis"]

@@ -74,7 +74,7 @@ services:
     build: .
     container_name: raft-service-1
     ports:
-      - "8001:8000"
+      - "8000:8000"
     environment:
       - NODE=service1
       - PORT=8000
@@ -93,7 +93,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    command: ["./raft-redis","service"]
+    command: ["./client-service"]
 volumes:
   node1-data:
   node2-data:

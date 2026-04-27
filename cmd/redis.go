@@ -35,6 +35,13 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+type Command struct {
+	Op    string `json:"op"`
+	Key   string `json:"key"`
+	Value string `json:"value,omitempty"`
+	TTLMs int64  `json:"ttl_ms,omitempty"`
+}
+
 type ServerConfig struct {
 	NodeID    string
 	Port      int
