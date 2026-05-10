@@ -15,10 +15,8 @@ import (
 
 // Command is the canonical write operation sent through the Raft log.
 type Command struct {
-	Op    string `json:"op"`
-	Key   string `json:"key"`
-	Value string `json:"value,omitempty"`
-	TTLMs int64  `json:"ttl_ms,omitempty"`
+	Op   string            `json:"op"`
+	Args map[string]string `json:"args"`
 }
 
 // ServiceConfig holds the service configuration
@@ -220,7 +218,14 @@ func (s *ServiceServer) handleRedisSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cmd := Command{Op: "set", Key: req.Key, Value: req.Value, TTLMs: req.ExpireMs}
+	cmd := Command{
+		Op: "SET",
+		Args: map[string]string{
+			"key":       req.Key,
+			"value":     req.Value,
+			"expire_ms": fmt.Sprint(req.ExpireMs),
+		},
+	}
 	data, _ := json.Marshal(cmd)
 
 	resp, err := s.forwardToLeader("/raft/command", data)
@@ -241,7 +246,7 @@ func (s *ServiceServer) handleRedisSet(w http.ResponseWriter, r *http.Request) {
 
 // handleRedisGet handles the /redis/get endpoint
 func (s *ServiceServer) handleRedisGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -252,8 +257,14 @@ func (s *ServiceServer) handleRedisGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, _ := json.Marshal(req)
-	resp, err := s.forwardToLeader("/raft/get", data)
+	cmd := Command{
+		Op: "GET",
+		Args: map[string]string{
+			"key": req.Key,
+		},
+	}
+	data, _ := json.Marshal(cmd)
+	resp, err := s.forwardToLeader("/raft/command", data)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
 		return
@@ -277,7 +288,12 @@ func (s *ServiceServer) handleRedisDelete(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cmd := Command{Op: "del", Key: req.Key}
+	cmd := Command{
+		Op: "DEL",
+		Args: map[string]string{
+			"key": req.Key,
+		},
+	}
 	data, _ := json.Marshal(cmd)
 
 	resp, err := s.forwardToLeader("/raft/command", data)

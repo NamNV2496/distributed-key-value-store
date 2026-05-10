@@ -1,0 +1,143 @@
+package redis
+
+import (
+	"encoding/json"
+	"fmt"
+	"sync"
+
+	"github.com/namnv2496/go-redis-raft/raft"
+	"github.com/namnv2496/go-redis-raft/redis/data_structure"
+)
+
+// Command represents a Redis command serialized in Raft log
+type Command struct {
+	Cmd  string            `json:"cmd,omitempty"`
+	Args map[string]string `json:"args,omitempty"`
+}
+
+// IRedisStore is the interface for the Redis store with Raft integration
+type IRedisStore interface {
+	RunApplyLoop()
+	EvalAndResponse(cmd *Command) (any, error)
+}
+
+type redisStore struct {
+	raftNode   *raft.RaftNode
+	dictStore  *data_structure.Dict
+	zsetStore  map[string]data_structure.IZSet
+	setStore   map[string]data_structure.ISet
+	cmsStore   map[string]data_structure.ICMS
+	bloomStore map[string]data_structure.IBloomFilter
+	mu         sync.RWMutex
+}
+
+// NewRedisStore creates a new Redis store with the given store factory
+func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
+	return &redisStore{
+		dictStore:  data_structure.CreateDict(),
+		zsetStore:  data_structure.CreateZSetMap(),
+		setStore:   data_structure.CreateSetMap(),
+		cmsStore:   data_structure.CreateCMSMap(),
+		bloomStore: data_structure.CreateBloomFilterMap(),
+		raftNode:   raftNode,
+	}
+}
+
+// RunApplyLoop reads committed entries from the Raft node and applies them to the store.
+// This worker syncs all state-changing commands across Raft cluster nodes.
+func (s *redisStore) RunApplyLoop() {
+	for entry := range s.raftNode.ApplyChan() {
+		var cmd Command
+		if err := json.Unmarshal(entry.Data, &cmd); err != nil {
+			continue
+		}
+		s.mu.Lock()
+		s.EvalAndResponse(&cmd)
+		s.mu.Unlock()
+	}
+}
+
+func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
+	var res []byte
+	switch cmd.Cmd {
+	case "PING":
+		res = s.cmdPING(cmd.Args)
+	case "SET":
+		res = s.cmdSET(cmd.Args)
+	case "GET":
+		res = s.cmdGET(cmd.Args)
+	case "TTL":
+		res = s.cmdGetTTL(cmd.Args)
+	case "DEL":
+		res = s.cmdDEL(cmd.Args)
+	case "EXPIRE":
+		res = s.cmdEXPIRE(cmd.Args)
+	case "INCR":
+		res = s.cmdINCR(cmd.Args)
+	// Set
+	case "SADD":
+		res = s.cmdSADD(cmd.Args)
+	case "SREM":
+		res = s.cmdSREM(cmd.Args)
+	case "SCARD":
+		res = s.cmdSCARD(cmd.Args)
+	case "SMEMBERS":
+		res = s.cmdSMEMBERS(cmd.Args)
+	case "SISMEMBER":
+		res = s.cmdSISMEMBER(cmd.Args)
+	case "SMISMEMBER":
+		res = s.cmdSMISMEMBER(cmd.Args)
+	case "SRAND":
+		res = s.cmdSRAND(cmd.Args)
+	case "SPOP":
+		res = s.cmdSPOP(cmd.Args)
+
+	// Sorted set
+	case "ZADD":
+		res = s.cmdZADD(cmd.Args)
+	case "ZRANK":
+		res = s.cmdZRANK(cmd.Args)
+	case "ZREM":
+		res = s.cmdZREM(cmd.Args)
+	case "ZSCORE":
+		res = s.cmdZSCORE(cmd.Args)
+	case "ZCARD":
+		res = s.cmdZCARD(cmd.Args)
+	// Geo Hash
+	case "GEOADD":
+		res = s.cmdGEOADD(cmd.Args)
+	case "GEODIST":
+		res = s.cmdGEODIST(cmd.Args)
+	case "GEOHASH":
+		res = s.cmdGEOHASH(cmd.Args)
+	case "GEOSEARCH":
+		res = s.cmdGEOSEARCH(cmd.Args)
+	case "GEOPOS":
+		res = s.cmdGEOPOS(cmd.Args)
+
+	// Bloom filter
+	// case "BF_RESERVE":
+	// 	res = s.cmdBFRESERVE(cmd.Args)
+	// case "BF_INFO":
+	// 	res = s.cmdBFINFO(cmd.Args)
+	// case "BF_MADD":
+	// 	res = s.cmdBFMADD(cmd.Args)
+	// case "BF_EXISTS":
+	// 	res = s.cmdBFEXISTS(cmd.Args)
+	// case "BF_MEXISTS":
+	// 	res = s.cmdBFMEXISTS(cmd.Args)
+	// // Count-Min Sketch
+	// case "CMS_INITBYDIM":
+	// 	res = s.cmdCMSINITBYDIM(cmd.Args)
+	// case "CMS_INITBYPROB":
+	// 	res = s.cmdCMSINITBYPROB(cmd.Args)
+	// case "CMS_INCRBY":
+	// 	res = s.cmdCMSINCRBY(cmd.Args)
+	// case "CMS_QUERY":
+	// 	res = s.cmdCMSQUERY(cmd.Args)
+	default:
+		return nil, fmt.Errorf("not found")
+	}
+	resp, _ := Decode(res)
+	return resp, nil
+}

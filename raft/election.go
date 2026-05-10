@@ -11,7 +11,7 @@ type VoteResponse struct {
 	VoteGranted bool
 }
 
-func (rn *RaftNode) campaign(preVote bool) {
+func (rn *RaftNode) campaignFindLeaderNode(preVote bool) {
 	rn.mu.Lock()
 
 	if rn.role == LeaderRole {
@@ -23,7 +23,7 @@ func (rn *RaftNode) campaign(preVote bool) {
 	if len(rn.clientMap) == 0 {
 		if preVote {
 			rn.mu.Unlock()
-			rn.campaign(false)
+			rn.campaignFindLeaderNode(false)
 			return
 		}
 		rn.state.SetCurrentTerm(rn.state.CurrentTerm() + 1)
@@ -130,7 +130,7 @@ func (rn *RaftNode) campaign(preVote bool) {
 			rn.mu.Lock()
 			if preVote {
 				rn.mu.Unlock()
-				rn.campaign(false)
+				rn.campaignFindLeaderNode(false)
 			} else {
 				rn.role = LeaderRole
 				rn.leaderId = rn.nodeID
@@ -160,28 +160,6 @@ func (rn *RaftNode) campaign(preVote bool) {
 	rn.mu.Unlock()
 }
 
-func (rn *RaftNode) isLogUpToDate(candidateLastTerm, candidateLastIndex int64) bool {
-	rn.mu.RLock()
-	defer rn.mu.RUnlock()
-
-	var myLastTerm, myLastIndex int64
-	lastEntry := rn.log.LastEntry()
-	if lastEntry != nil {
-		myLastTerm = lastEntry.Term
-		myLastIndex = lastEntry.Index
-	} else {
-		myLastIndex = -1
-		myLastTerm = 0
-	}
-
-	if candidateLastTerm != myLastTerm {
-		return candidateLastTerm > myLastTerm
-	}
-	return candidateLastIndex >= myLastIndex
-}
-
-// quorum returns the minimum votes needed to win: floor(N/2) + 1.
-// Uses clientMap (peers excluding self) so the cluster size is always correct.
 func (rn *RaftNode) quorum() int {
 	return (len(rn.clientMap)+1)/2 + 1
 }

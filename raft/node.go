@@ -17,12 +17,9 @@ type NodeRole string
 type NodeState int
 
 const (
-	FollowerRole  NodeRole  = "Follower"
-	LeaderRole    NodeRole  = "Leader"
-	CandidateRole NodeRole  = "Candidate"
-	Follower      NodeState = iota
-	Candidate
-	Leader
+	FollowerRole  NodeRole = "Follower"
+	LeaderRole    NodeRole = "Leader"
+	CandidateRole NodeRole = "Candidate"
 )
 
 // RaftNode represents a Raft consensus node
@@ -135,7 +132,7 @@ func (rn *RaftNode) Start() {
 
 	// Single-node cluster: skip the election timeout and become leader now.
 	if singleNode {
-		go rn.campaign(false)
+		go rn.campaignFindLeaderNode(false)
 	}
 }
 
@@ -155,8 +152,8 @@ func (rn *RaftNode) runHealthChecker() {
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
-	fails            := make(map[string]int)
-	dead             := make(map[string]bool)
+	fails := make(map[string]int)
+	dead := make(map[string]bool)
 	lastRecoveryPing := make(map[string]time.Time)
 
 	for {
@@ -165,9 +162,9 @@ func (rn *RaftNode) runHealthChecker() {
 			return
 		case <-ticker.C:
 			rn.mu.RLock()
-			role     := rn.role
+			role := rn.role
 			leaderId := rn.leaderId
-			peers    := make(map[string]string, len(rn.clientMap))
+			peers := make(map[string]string, len(rn.clientMap))
 			for id := range rn.clientMap {
 				peers[id] = rn.peers[id]
 			}
@@ -212,7 +209,7 @@ func (rn *RaftNode) runHealthChecker() {
 						rn.mu.Unlock()
 						// Random jitter (0-50 ms) to reduce split-vote probability.
 						delay := time.Duration(rand.Intn(50)) * time.Millisecond
-						time.AfterFunc(delay, func() { go rn.campaign(false) })
+						time.AfterFunc(delay, func() { go rn.campaignFindLeaderNode(false) })
 					}
 				}
 			}
@@ -287,7 +284,7 @@ func (rn *RaftNode) run() {
 			rn.resetElectionTimer()
 			rn.mu.Unlock()
 			if role != LeaderRole {
-				go rn.campaign(false)
+				go rn.campaignFindLeaderNode(false)
 			}
 		case <-rn.stopChan:
 			return
@@ -297,7 +294,7 @@ func (rn *RaftNode) run() {
 
 // Propose appends a command to the leader's log, replicates it immediately,
 // and returns the log index so the caller can wait for it to be committed.
-func (rn *RaftNode) Propose(data []byte) (int64, error) {
+func (rn *RaftNode) Propose(cmd string, data []byte) (int64, error) {
 	rn.mu.Lock()
 	if rn.role != LeaderRole {
 		rn.mu.Unlock()
@@ -305,14 +302,14 @@ func (rn *RaftNode) Propose(data []byte) (int64, error) {
 	}
 	term := rn.state.CurrentTerm()
 	index := int64(rn.log.Len())
-	if err := rn.log.Append(term, index, data); err != nil {
+	if err := rn.log.Append(cmd, term, index, data); err != nil {
 		rn.mu.Unlock()
 		return -1, err
 	}
 	rn.mu.Unlock()
 
 	// Replicate immediately rather than waiting for the next heartbeat.
-	rn.sendAppendEntries(term, false)
+	rn.sendAppendEntries(false)
 	return index, nil
 }
 
@@ -340,12 +337,11 @@ func (rn *RaftNode) AddPeer(nodeID, addr string) {
 func (rn *RaftNode) ReplicateTo(nodeID string) {
 	rn.mu.RLock()
 	client, ok := rn.clientMap[nodeID]
-	term := rn.state.CurrentTerm()
 	rn.mu.RUnlock()
 	if !ok {
 		return
 	}
-	go rn.sendAppendEntriesTo(nodeID, client, term, false)
+	go rn.sendAppendEntriesTo(nodeID, client, false)
 }
 
 // GetPeers returns a snapshot of current peer addresses (excludes self).
@@ -523,15 +519,19 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, args *AppendEntriesArgs) 
 
 	// Append entries
 	if len(args.Entries) > 0 {
-		// Truncate log if there are conflicting entries
+		// Truncate log if there are conflicting entries.
 		if args.PrevLogIndex+1 < int64(rn.log.Len()) {
-			rn.log.TruncateAfter(args.PrevLogIndex)
+			if err := rn.log.TruncateAfter(args.PrevLogIndex); err != nil {
+				return nil, err
+			}
 		}
 
 		// Append new entries
 		for i, entry := range args.Entries {
 			idx := args.PrevLogIndex + 1 + int64(i)
-			rn.log.Append(entry.Term, idx, entry.Data)
+			if err := rn.log.Append(entry.Cmd, entry.Term, idx, entry.Data); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -578,23 +578,29 @@ func (rn *RaftNode) sendHeartbeats() {
 				rn.mu.RUnlock()
 				return
 			}
-			currentTerm := rn.state.CurrentTerm()
 			rn.mu.RUnlock()
 
-			rn.sendAppendEntries(currentTerm, true)
+			rn.sendAppendEntries(true)
 		}
 	}
 }
 
 // sendAppendEntries sends AppendEntries RPC to all followers
-func (rn *RaftNode) sendAppendEntries(term int64, isHeartbeat bool) {
+func (rn *RaftNode) sendAppendEntries(isHeartbeat bool) {
+	rn.mu.RLock()
+	clients := make(map[string]RaftRPCClient, len(rn.clientMap))
 	for peerID, client := range rn.clientMap {
-		go rn.sendAppendEntriesTo(peerID, client, term, isHeartbeat)
+		clients[peerID] = client
+	}
+	rn.mu.RUnlock()
+
+	for peerID, client := range clients {
+		go rn.sendAppendEntriesTo(peerID, client, isHeartbeat)
 	}
 }
 
 // sendAppendEntriesTo sends AppendEntries RPC to a specific peer
-func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, term int64, isHeartbeat bool) {
+func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, isHeartbeat bool) {
 	rn.mu.RLock()
 
 	nextIdx := rn.nextIndex[peerID]
@@ -625,6 +631,7 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, ter
 	}
 
 	currentTerm := rn.state.CurrentTerm()
+	leaderCommit := rn.commitIndex
 	rn.mu.RUnlock()
 
 	args := &AppendEntriesArgs{
@@ -633,7 +640,7 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, ter
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
 		Entries:      entries,
-		LeaderCommit: rn.commitIndex,
+		LeaderCommit: leaderCommit,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

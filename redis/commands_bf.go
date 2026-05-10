@@ -1,0 +1,120 @@
+package redis
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+
+	"github.com/namnv2496/go-redis-raft/redis/data_structure"
+)
+
+func (s *redisStore) cmdBFRESERVE(args map[string]string) []byte {
+	if !(len(args) == 3 || len(args) == 5) {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.RESERVE' command"), false)
+	}
+	key := args["key"]
+	errRate, err := strconv.ParseFloat(args["errRate"], 64)
+	if err != nil {
+		return Encode(errors.New(fmt.Sprintf("error rate must be a floating point number %s", args["errRate"])), false)
+	}
+	capacity, err := strconv.ParseUint(args["capacity"], 10, 64)
+	if err != nil {
+		return Encode(errors.New(fmt.Sprintf("capacity must be an integer number %s", args["capacity"])), false)
+	}
+	var growthRate uint64 = data_structure.BfDefaultExpansion
+	if len(args) == 5 {
+		if args["expansion"] != "EXPANSION" {
+			return Encode(errors.New("(error) 4th param must be EXPANSION for 'BF.RESERVE' command"), false)
+		}
+		growthRate, err = strconv.ParseUint(args["growthRate"], 10, 32)
+		if err != nil {
+			return Encode(errors.New(fmt.Sprintf("growthRate must be an integer number %s", args["growthRate"])), false)
+		}
+		if growthRate < 1 {
+			return Encode(errors.New(fmt.Sprintf("growthRate should be greater or equal to 1 %d", growthRate)), false)
+		}
+	}
+	_, exist := s.bloomStore[key]
+	if exist {
+		return Encode(errors.New(fmt.Sprintf("Bloom filter with key '%s' already exist", key)), false)
+	}
+	s.bloomStore[key] = data_structure.CreateBloomFilter(capacity, errRate)
+	return RespOk
+}
+
+func (s *redisStore) cmdBFINFO(args map[string]string) []byte {
+	if len(args) != 1 {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.INFO' command"), false)
+	}
+	key := args["key"]
+	_, exist := s.bloomStore[key]
+	if !exist {
+		return Encode(errors.New(fmt.Sprintf("Bloom filter with key '%s' does not exist", key)), false)
+	}
+	var res []string
+	// res = append(res, "Capacity", fmt.Sprintf("%d", sb.GetCapacity()))
+
+	return Encode(res, false)
+}
+
+func (s *redisStore) cmdBFMADD(args map[string]string) []byte {
+	if len(args) < 2 {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.MADD' command"), false)
+	}
+	// key := args["key"]
+	// bloom, exist := s.bloomStore[key]
+	// var err error
+	// if !exist {
+	// 	sb := data_structure.CreateBloomFilter(data_structure.BfDefaultInitCapacity,
+	// 		data_structure.BfDefaultErrRate)
+	// 	s.bloomStore[key] = sb
+	// }
+	var res []string
+	// for i := 1; i < len(args); i++ {
+	// 	item := args[i]
+	// 	err = bloom.Add(item)
+	// 	if err != nil {
+	// 		res = append(res, "ERR problem inserting into filter")
+	// 	} else {
+	// 		res = append(res, "1")
+	// 	}
+	// }
+	return Encode(res, false)
+}
+
+func (s *redisStore) cmdBFEXISTS(args map[string]string) []byte {
+	if len(args) != 2 {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.EXISTS' command"), false)
+	}
+	key, item := args["key"], args["item"]
+	sb, exist := s.bloomStore[key]
+	if !exist {
+		return RespZero
+	}
+	if !sb.Exist(item) {
+		return RespZero
+	}
+	return RespOne
+}
+
+func (s *redisStore) cmdBFMEXISTS(args map[string]string) []byte {
+	if len(args) < 2 {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.MEXISTS' command"), false)
+	}
+	// key := args["key"]
+	// sb, exist := s.bloomStore[key]
+	var res []string
+	// for i := 1; i < len(args); i++ {
+	// 	if !exist {
+	// 		res = append(res, "0")
+	// 		continue
+	// 	}
+	// 	item := args[i]
+	// 	if !sb.Exist(item) {
+	// 		res = append(res, "0")
+	// 		continue
+	// 	}
+	// 	res = append(res, "1")
+	// }
+	return Encode(res, false)
+}

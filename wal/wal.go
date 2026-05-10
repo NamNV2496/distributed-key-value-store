@@ -11,6 +11,7 @@ import (
 
 // LogEntry represents a WAL entry
 type LogEntry struct {
+	Cmd   string `json:"cmd"`
 	Term  int64  `json:"term"`
 	Index int64  `json:"index"`
 	Data  []byte `json:"data"`
@@ -49,26 +50,35 @@ func NewWAL(filename string) (*WAL, error) {
 	return wal, nil
 }
 
+func isWriteCommand(cmd string) bool {
+	switch cmd {
+	case "SET", "DEL", "EXPIRE", "INCR", "ZADD", "ZREM", "GEOADD":
+		return true
+	default:
+		return false
+	}
+}
+
 // Append adds a new entry to the WAL
-func (w *WAL) Append(term, index int64, data []byte) error {
+func (w *WAL) Append(cmd string, term, index int64, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
+	if !isWriteCommand(cmd) {
+		return nil
+	}
 	entry := LogEntry{
+		Cmd:   cmd,
 		Term:  term,
 		Index: index,
 		Data:  data,
 	}
-
 	// Write to file
 	if err := w.writeEntry(entry); err != nil {
 		return err
 	}
-
 	if err := w.writer.Flush(); err != nil {
 		return fmt.Errorf("failed to flush WAL: %w", err)
 	}
-
 	w.entries = append(w.entries, entry)
 	return nil
 }
@@ -112,7 +122,8 @@ func (w *WAL) TruncateAfter(index int64) error {
 	defer w.mu.Unlock()
 
 	if index < 0 {
-		return fmt.Errorf("invalid index: %d", index)
+		w.entries = w.entries[:0]
+		return w.rewrite()
 	}
 
 	if index >= int64(len(w.entries)) {
@@ -121,7 +132,6 @@ func (w *WAL) TruncateAfter(index int64) error {
 
 	w.entries = w.entries[:index+1]
 
-	// Rewrite the file
 	return w.rewrite()
 }
 

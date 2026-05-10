@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/namnv2496/go-redis-raft/raft"
+	"github.com/namnv2496/go-redis-raft/redis"
 	"github.com/spf13/cobra"
 )
 
@@ -35,13 +37,6 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-type Command struct {
-	Op    string `json:"op"`
-	Key   string `json:"key"`
-	Value string `json:"value,omitempty"`
-	TTLMs int64  `json:"ttl_ms,omitempty"`
-}
-
 type ServerConfig struct {
 	NodeID    string
 	Port      int
@@ -52,14 +47,14 @@ type ServerConfig struct {
 }
 
 type RaftRedisServer struct {
-	config     ServerConfig
+	NodeID     string
 	raftNode   *raft.RaftNode
-	httpServer *http.Server
-	kvData     map[string]string
+	redisStore redis.IRedisStore
+	peers      map[string]string
 	kvMu       sync.RWMutex
 }
 
-func StartRedisServer() {
+func StartRedisServer() error {
 	// Read from environment variables or use defaults
 	nodeID := getEnv("NODE", "node1")
 	portStr := getEnv("PORT", "5000")
@@ -69,9 +64,9 @@ func StartRedisServer() {
 
 	// Parse port
 	var port int
-	fmt.Sscanf(portStr, "%d", &port)
-	if port == 0 {
-		port = 5000
+	_, err := fmt.Sscanf(portStr, "%d", &port)
+	if err != nil {
+		return err
 	}
 
 	// Default file paths
@@ -97,21 +92,32 @@ func StartRedisServer() {
 	}
 	// Always add ourselves - use Docker network hostname
 	peersMap[nodeID] = fmt.Sprintf("http://%s:5000", nodeID)
-
-	config := ServerConfig{
+	// Create Raft node
+	raftConfig := raft.Config{
 		NodeID:    nodeID,
-		Port:      port,
 		Peers:     peersMap,
 		LogFile:   logFile,
 		StateFile: stateFile,
+		OnStateChange: func(role raft.NodeRole) {
+			roleStr := "Unknown"
+			switch role {
+			case raft.FollowerRole:
+				roleStr = "Follower"
+			case raft.CandidateRole:
+				roleStr = "Candidate"
+			case raft.LeaderRole:
+				roleStr = "Leader"
+				log.Printf("[%s] ⭐ Became LEADER\n", nodeID)
+			}
+			log.Printf("[%s] Node role changed to: %s\n", nodeID, roleStr)
+		},
 	}
-
-	log.Printf("Starting Raft node server (consensus only)")
-	log.Printf("  Node ID: %s", config.NodeID)
-	log.Printf("  Port: %d", config.Port)
-	log.Printf("  Peers: %v", config.Peers)
-
-	server, err := NewRaftRedisServer(config)
+	raftNode, err := raft.NewRaftNode(raftConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create raft node: %w", err)
+	}
+	redisStore := redis.NewRedisStore(raftNode)
+	server, err := NewRaftRedisServer(nodeID, raftNode, redisStore, peersMap)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
@@ -122,17 +128,16 @@ func StartRedisServer() {
 		mux.HandleFunc("/raft/vote", server.handleRequestVote)
 		mux.HandleFunc("/raft/append", server.handleAppendEntries)
 		mux.HandleFunc("/raft/command", server.handleCommand)
-		mux.HandleFunc("/raft/get", server.handleGet)
 		mux.HandleFunc("/health", server.handleHealth)
 		mux.HandleFunc("/status", server.handleStatus)
 
-		addr := fmt.Sprintf(":%d", config.Port)
-		log.Printf("[%s] Raft HTTP server listening on %s", config.NodeID, addr)
+		addr := fmt.Sprintf(":%d", port)
+		log.Printf("[%s] Raft HTTP server listening on %s", nodeID, addr)
 		if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
-			log.Printf("[%s] HTTP server error: %v", config.NodeID, err)
+			log.Printf("[%s] HTTP server error: %v", nodeID, err)
 		}
 	}()
-
+	go redisStore.RunApplyLoop()
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -148,73 +153,26 @@ func StartRedisServer() {
 	select {}
 }
 
-func NewRaftRedisServer(config ServerConfig) (*RaftRedisServer, error) {
-	s := &RaftRedisServer{
-		config: config,
-		kvData: make(map[string]string),
-	}
-
-	// Create Raft node
-	raftConfig := raft.Config{
-		NodeID:    config.NodeID,
-		Peers:     config.Peers,
-		LogFile:   config.LogFile,
-		StateFile: config.StateFile,
-		OnStateChange: func(role raft.NodeRole) {
-			roleStr := "Unknown"
-			switch role {
-			case raft.FollowerRole:
-				roleStr = "Follower"
-			case raft.CandidateRole:
-				roleStr = "Candidate"
-			case raft.LeaderRole:
-				roleStr = "Leader"
-				log.Printf("[%s] ⭐ Became LEADER\n", config.NodeID)
-			}
-			log.Printf("[%s] Node role changed to: %s\n", config.NodeID, roleStr)
-		},
-	}
-
-	raftNode, err := raft.NewRaftNode(raftConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create raft node: %w", err)
-	}
-	s.raftNode = raftNode
-
-	// Start the Raft node
+func NewRaftRedisServer(
+	nodeID string,
+	raftNode *raft.RaftNode,
+	redisStore redis.IRedisStore,
+	peers map[string]string,
+) (*RaftRedisServer, error) {
 	raftNode.Start()
-
-	// Consume committed log entries and apply them to the local KV store.
-	go s.runApplyLoop()
-
-	return s, nil
-}
-
-// runApplyLoop reads committed entries from the Raft node and applies them.
-func (s *RaftRedisServer) runApplyLoop() {
-	for entry := range s.raftNode.ApplyChan() {
-		var cmd Command
-		if err := json.Unmarshal(entry.Data, &cmd); err != nil {
-			continue
-		}
-		s.kvMu.Lock()
-		switch cmd.Op {
-		case "set":
-			s.kvData[cmd.Key] = cmd.Value
-		case "del":
-			delete(s.kvData, cmd.Key)
-		}
-		s.kvMu.Unlock()
-	}
+	return &RaftRedisServer{
+		NodeID:     nodeID,
+		raftNode:   raftNode,
+		redisStore: redisStore,
+		peers:      peers,
+		kvMu:       sync.RWMutex{},
+	}, nil
 }
 
 // Stop gracefully stops the server
 func (s *RaftRedisServer) Stop() {
 	if s.raftNode != nil {
 		s.raftNode.Stop()
-	}
-	if s.httpServer != nil {
-		s.httpServer.Close()
 	}
 }
 
@@ -274,61 +232,110 @@ func (s *RaftRedisServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
 }
 
-// handleCommand is the client-facing write endpoint. The service forwards
-// SET/DEL commands here; the leader appends, replicates, and waits for commit.
-func (s *RaftRedisServer) handleCommand(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+func isWriteCommand(cmd string) bool {
+	switch cmd {
+	case "SET", "DEL", "EXPIRE", "INCR", "ZADD", "ZREM", "GEOADD":
+		return true
+	default:
+		return false
 	}
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	index, err := s.raftNode.Propose(data)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	if err := s.raftNode.WaitCommit(ctx, index); err != nil {
-		http.Error(w, "commit timeout: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"node_id": s.config.NodeID,
-		"index":   index,
-	})
 }
 
-// handleGet is the client-facing read endpoint; reads from the local KV store.
-func (s *RaftRedisServer) handleGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+func (s *RaftRedisServer) leaderURL() (string, error) {
+	leaderID := s.raftNode.GetLeaderID()
+	if leaderID == "" {
+		return "", fmt.Errorf("leader unknown")
+	}
+
+	addr, ok := s.peers[leaderID]
+	if !ok {
+		return "", fmt.Errorf("leader address not found for %s", leaderID)
+	}
+	return addr, nil
+}
+
+func (s *RaftRedisServer) forwardToLeader(ctx context.Context, body []byte) (*http.Response, error) {
+	leaderURL, err := s.leaderURL()
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, leaderURL+"/raft/command", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return http.DefaultClient.Do(req)
+}
+
+func (s *RaftRedisServer) handleCommand(w http.ResponseWriter, r *http.Request) {
+	leaderID := s.raftNode.GetLeaderID()
+	if leaderID == "" {
+		http.Error(w, "leader unknown", http.StatusServiceUnavailable)
 		return
 	}
-	var req struct {
-		Key string `json:"key"`
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+
+	if leaderID != s.NodeID {
+		resp, err := s.forwardToLeader(r.Context(), body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		defer resp.Body.Close()
+
+		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	var commandReq redis.Command
+	if err := json.Unmarshal(body, &commandReq); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.kvMu.RLock()
-	value, found := s.kvData[req.Key]
-	s.kvMu.RUnlock()
+
+	if isWriteCommand(commandReq.Cmd) {
+		index, err := s.raftNode.Propose(commandReq.Cmd, body)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to propose command: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		if err := s.raftNode.WaitCommit(r.Context(), index); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to wait for command commit: %v", err), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"node_id": s.NodeID,
+			"result":  "OK",
+		}); err != nil {
+			log.Printf("[%s] Failed to encode response: %v", s.NodeID, err)
+		}
+		return
+	}
+
+	result, err := s.redisStore.EvalAndResponse(&commandReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Command failed: %v", err), http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"node_id": s.config.NodeID,
-		"value":   value,
-		"found":   found,
-	})
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"node_id": s.NodeID,
+		"result":  result,
+	}); err != nil {
+		log.Printf("[%s] Failed to encode response: %v", s.NodeID, err)
+	}
 }
 
 // handleStatus handles the /status endpoint
@@ -349,8 +356,8 @@ func (s *RaftRedisServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		roleStr = "leader"
 	}
 
-	status := map[string]interface{}{
-		"node_id":   s.config.NodeID,
+	status := map[string]any{
+		"node_id":   s.NodeID,
 		"role":      roleStr,
 		"leader_id": s.raftNode.GetLeaderID(),
 		"is_leader": role == raft.LeaderRole,

@@ -7,10 +7,11 @@ A distributed key-value store built from scratch in Go, using the **Raft consens
 ```
 ┌──────────────────────────────────────────────┐
 │          REST API Gateway (service)           │
-│  POST /redis/set   POST /redis/get            │
+│  POST /redis/set   GET /redis/get            │
 │  POST /redis/del   GET  /cluster/status       │
 └──────────────────────┬───────────────────────┘
-                       │  discovers leader, forwards writes
+                       │  discovers leader, forwards writes /raft/command
+                       | 
                        ▼
 ┌──────────────────────────────────────────────┐
 │          Raft Consensus Nodes                 │
