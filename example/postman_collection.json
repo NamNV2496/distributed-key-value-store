@@ -1,0 +1,642 @@
+{
+  "info": {
+    "name": "go-redis-raft",
+    "description": "All commands for the go-redis-raft distributed key-value store.\nImport this file into Postman, then set the `base_url` collection variable to point at any node (e.g. http://localhost:8000). The client-service auto-discovers the leader.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "raft_url",
+      "value": "http://localhost:5000",
+      "type": "string",
+      "description": "Direct Raft node URL — use when calling /raft/* endpoints without the client-service"
+    }
+  ],
+  "item": [
+    {
+      "name": "String / Key",
+      "item": [
+        {
+          "name": "PING",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"PING\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "PING with message",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"PING\",\n  \"args\": {\n    \"message\": \"hello\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SET",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SET\",\n  \"args\": {\n    \"key\": \"foo\",\n    \"value\": \"bar\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SET with TTL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SET\",\n  \"args\": {\n    \"key\": \"foo\",\n    \"value\": \"bar\",\n    \"ttl\": \"60\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "GET",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GET\",\n  \"args\": {\n    \"key\": \"foo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "TTL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"TTL\",\n  \"args\": {\n    \"key\": \"foo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Returns remaining TTL in seconds. -1 = no expiry, -2 = key not found."
+          }
+        },
+        {
+          "name": "DEL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"DEL\",\n  \"args\": {\n    \"key\": \"foo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "EXPIRE",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"EXPIRE\",\n  \"args\": {\n    \"key\": \"foo\",\n    \"ttl\": \"120\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "INCR",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"INCR\",\n  \"args\": {\n    \"key\": \"counter\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Set",
+      "item": [
+        {
+          "name": "SADD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SADD\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SREM",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SREM\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SCARD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SCARD\",\n  \"args\": {\n    \"key\": \"myset\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SMEMBERS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SMEMBERS\",\n  \"args\": {\n    \"key\": \"myset\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SISMEMBER",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SISMEMBER\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SMISMEMBER",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SMISMEMBER\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SRAND (1 member)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SRAND\",\n  \"args\": {\n    \"key\": \"myset\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SRAND (N members)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SRAND\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"3\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SPOP (1 member)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SPOP\",\n  \"args\": {\n    \"key\": \"myset\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "SPOP (N members)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"SPOP\",\n  \"args\": {\n    \"key\": \"myset\",\n    \"value\": \"2\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Sorted Set",
+      "item": [
+        {
+          "name": "ZADD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZADD\",\n  \"args\": {\n    \"key\": \"board\",\n    \"score\": \"100\",\n    \"member\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "ZADD NX",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZADD\",\n  \"args\": {\n    \"key\": \"board\",\n    \"score\": \"200\",\n    \"member\": \"bob\",\n    \"nx\": \"true\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Only add if member does not already exist."
+          }
+        },
+        {
+          "name": "ZADD XX",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZADD\",\n  \"args\": {\n    \"key\": \"board\",\n    \"score\": \"300\",\n    \"member\": \"alice\",\n    \"xx\": \"true\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Only update if member already exists."
+          }
+        },
+        {
+          "name": "ZRANK",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZRANK\",\n  \"args\": {\n    \"key\": \"board\",\n    \"member\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "0-based rank, ascending order."
+          }
+        },
+        {
+          "name": "ZSCORE",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZSCORE\",\n  \"args\": {\n    \"key\": \"board\",\n    \"member\": \"alice\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "ZCARD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZCARD\",\n  \"args\": {\n    \"key\": \"board\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "ZREM",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"ZREM\",\n  \"args\": {\n    \"key\": \"board\",\n    \"m1\": \"alice\",\n    \"m2\": \"bob\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "All args except 'key' are treated as member names to remove."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Geo",
+      "item": [
+        {
+          "name": "GEOADD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEOADD\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"longitude\": \"13.361389\",\n    \"latitude\": \"38.115556\",\n    \"member\": \"Palermo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "GEODIST",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEODIST\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"member1\": \"Palermo\",\n    \"member2\": \"Catania\",\n    \"unit\": \"km\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "unit: m | km | ft | mi  (default m)"
+          }
+        },
+        {
+          "name": "GEOHASH",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEOHASH\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"m1\": \"Palermo\",\n    \"m2\": \"Catania\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "All args except 'key' are treated as member names."
+          }
+        },
+        {
+          "name": "GEOPOS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEOPOS\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"m1\": \"Palermo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "All args except 'key' are treated as member names."
+          }
+        },
+        {
+          "name": "GEOSEARCH from member",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEOSEARCH\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"frommember\": \"Palermo\",\n    \"radius\": \"200000\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "radius is in metres."
+          }
+        },
+        {
+          "name": "GEOSEARCH from lon/lat",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"GEOSEARCH\",\n  \"args\": {\n    \"key\": \"cities\",\n    \"fromlonlat_lon\": \"15\",\n    \"fromlonlat_lat\": \"37\",\n    \"radius\": \"200000\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Bloom Filter",
+      "item": [
+        {
+          "name": "BF_RESERVE",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_RESERVE\",\n  \"args\": {\n    \"key\": \"bf\",\n    \"errRate\": \"0.01\",\n    \"capacity\": \"10000\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "BF_RESERVE with expansion",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_RESERVE\",\n  \"args\": {\n    \"key\": \"bf2\",\n    \"errRate\": \"0.01\",\n    \"capacity\": \"10000\",\n    \"expansion\": \"EXPANSION\",\n    \"growthRate\": \"2\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "BF_MADD",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_MADD\",\n  \"args\": {\n    \"key\": \"bf\",\n    \"1\": \"foo\",\n    \"2\": \"bar\",\n    \"3\": \"baz\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Items are keyed \"1\", \"2\", ... up to N."
+          }
+        },
+        {
+          "name": "BF_EXISTS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_EXISTS\",\n  \"args\": {\n    \"key\": \"bf\",\n    \"item\": \"foo\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "BF_MEXISTS",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_MEXISTS\",\n  \"args\": {\n    \"key\": \"bf\",\n    \"1\": \"foo\",\n    \"2\": \"missing\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Items are keyed \"1\", \"2\", ... up to N."
+          }
+        },
+        {
+          "name": "BF_INFO",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"BF_INFO\",\n  \"args\": {\n    \"key\": \"bf\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Count-Min Sketch",
+      "item": [
+        {
+          "name": "CMS_INITBYDIM",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"CMS_INITBYDIM\",\n  \"args\": {\n    \"key\": \"cms\",\n    \"width\": \"2000\",\n    \"height\": \"7\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Create a CMS with explicit width × height grid."
+          }
+        },
+        {
+          "name": "CMS_INITBYPROB",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"CMS_INITBYPROB\",\n  \"args\": {\n    \"key\": \"cms2\",\n    \"errRate\": \"0.001\",\n    \"probability\": \"0.999\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] },
+            "description": "Derive grid size from error rate + confidence probability."
+          }
+        },
+        {
+          "name": "CMS_INCRBY",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"CMS_INCRBY\",\n  \"args\": {\n    \"key\": \"cms\",\n    \"value\": \"1\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        },
+        {
+          "name": "CMS_QUERY",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cmd\": \"CMS_QUERY\",\n  \"args\": {\n    \"key\": \"cms\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/redis", "host": ["{{base_url}}"], "path": ["redis"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cluster",
+      "item": [
+        {
+          "name": "Node status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{raft_url}}/status", "host": ["{{raft_url}}"], "path": ["status"] },
+            "description": "Returns role, leader_id, term for the targeted Raft node."
+          }
+        },
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{raft_url}}/health", "host": ["{{raft_url}}"], "path": ["health"] }
+          }
+        },
+        {
+          "name": "Cluster status (via client-service)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/cluster/status", "host": ["{{base_url}}"], "path": ["cluster", "status"] },
+            "description": "Queries every peer and aggregates role/leader/term for each node."
+          }
+        }
+      ]
+    }
+  ]
+}

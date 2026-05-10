@@ -9,46 +9,6 @@ import (
 type CommandOP string
 
 const (
-	PING   CommandOP = "PING"
-	GET    CommandOP = "GET"
-	SET    CommandOP = "SET"
-	DEL    CommandOP = "DEL"
-	TTL    CommandOP = "TTL"
-	EXPIRE CommandOP = "EXPIRE"
-	INCR   CommandOP = "INCR"
-	// set
-	SADD       CommandOP = "SADD"
-	SREM       CommandOP = "SREM"
-	SCARD      CommandOP = "SCARD"
-	SMEMBERS   CommandOP = "SMEMBERS"
-	SISMEMBER  CommandOP = "SISMEMBER"
-	SMISMEMBER CommandOP = "SMISMEMBER"
-	SRAND      CommandOP = "SRAND"
-	SPOP       CommandOP = "SPOP"
-	// sorted set
-	ZADD   CommandOP = "ZADD"
-	ZRANK  CommandOP = "ZRANK"
-	ZREM   CommandOP = "ZREM"
-	ZSCORE CommandOP = "ZSCORE"
-	ZCARD  CommandOP = "ZCARD"
-	// geo hash
-	GEOADD    CommandOP = "GEOADD"
-	GEODIST   CommandOP = "GEODIST"
-	GEOHASH   CommandOP = "GEOHASH"
-	GEOSEARCH CommandOP = "GEOSEARCH"
-	GEOPOS    CommandOP = "GEOPOS"
-	// Bloom filter
-	BF_RESERVE CommandOP = "BF_RESERVE"
-	BF_INFO    CommandOP = "BF_INFO"
-	BF_MADD    CommandOP = "BF_MADD"
-	BF_EXISTS  CommandOP = "BF_EXISTS"
-	BF_MEXISTS CommandOP = "BF_MEXISTS"
-	// Count-Min Sketch
-	CMS_INITBYDIM  CommandOP = "CMS_INITBYDIM"
-	CMS_INITBYPROB CommandOP = "CMS_INITBYPROB"
-	CMS_INCRBY     CommandOP = "CMS_INCRBY"
-	CMS_QUERY      CommandOP = "CMS_QUERY"
-
 	CRLF string = "\r\n"
 )
 
@@ -63,24 +23,10 @@ var (
 )
 
 const (
-	NoExpire            int64 = -1
-	ObjTypeString       uint8 = 0
-	ObjTypeList         uint8 = 1
-	ObjTypeSet          uint8 = 2
-	ObjTypeZSet         uint8 = 3
-	ObjTypeHash         uint8 = 4
-	ObjEncodingInt      uint8 = 0
-	ObjEncodingEmbStr   uint8 = 8
-	ObjEncodingHT       uint8 = 9
-	ObjEncodingZipMap   uint8 = 10
-	ObjEncodingZiplist  uint8 = 11
-	ObjEncodingIntSet   uint8 = 12
-	ObjEncodingSkiplist uint8 = 13
-
-	// ZSet flags
-	ZAddInNX   uint8 = 1
-	ZAddInXX   uint8 = 2
-	ZAddOutNop int   = 0
+	NoExpire          int64 = -1
+	ObjTypeString     uint8 = 0
+	ObjEncodingInt    uint8 = 0
+	ObjEncodingEmbStr uint8 = 8
 )
 
 func deduceTypeString(value string) (uint8, uint8) {
@@ -134,8 +80,8 @@ func DecodeOne(data []byte) (any, int, error) {
 		return readBulkString(data)
 	case '*':
 		return readArray(data)
-		// case '@':
-		// 	return readIntArray(data)
+	case '@':
+		return readIntArray(data)
 	}
 	return nil, 0, nil
 }
@@ -207,11 +153,19 @@ func readSimpleString(data []byte) (string, int, error) {
 
 // :123\r\n => 123
 func readInt64(data []byte) (int64, int, error) {
-	var res int64 = 0
+	var res int64
 	pos := 1
-	for data[pos] != '\r' {
+	neg := false
+	if pos < len(data) && data[pos] == '-' {
+		neg = true
+		pos++
+	}
+	for pos < len(data) && data[pos] != '\r' {
 		res = res*10 + int64(data[pos]-'0')
 		pos++
+	}
+	if neg {
+		res = -res
 	}
 	return res, pos + 2, nil
 }
@@ -226,10 +180,17 @@ func readLen(data []byte) (int, int) {
 	return int(res), pos
 }
 
-// $5\r\nhello\r\n => "hello"
+// $5\r\nhello\r\n => "hello", $-1\r\n => ""
 func readBulkString(data []byte) (string, int, error) {
 	length, pos := readLen(data)
-	return string(data[pos:(pos + length)]), pos + length + 2, nil
+	if length < 0 {
+		return "", pos, nil // null bulk string
+	}
+	end := pos + length
+	if end > len(data) {
+		return "", 0, fmt.Errorf("bulk string truncated: need %d bytes, have %d", length, len(data)-pos)
+	}
+	return string(data[pos:end]), end + 2, nil
 }
 
 // *2\r\n$5\r\nhello\r\n$5\r\nworld\r\n => {"hello", "world"}

@@ -50,22 +50,10 @@ func NewWAL(filename string) (*WAL, error) {
 	return wal, nil
 }
 
-func isWriteCommand(cmd string) bool {
-	switch cmd {
-	case "SET", "DEL", "EXPIRE", "INCR", "ZADD", "ZREM", "GEOADD":
-		return true
-	default:
-		return false
-	}
-}
-
 // Append adds a new entry to the WAL
 func (w *WAL) Append(cmd string, term, index int64, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !isWriteCommand(cmd) {
-		return nil
-	}
 	entry := LogEntry{
 		Cmd:   cmd,
 		Term:  term,

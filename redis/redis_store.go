@@ -3,6 +3,7 @@ package redis
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 
 	"github.com/namnv2496/go-redis-raft/raft"
@@ -31,7 +32,6 @@ type redisStore struct {
 	mu         sync.RWMutex
 }
 
-// NewRedisStore creates a new Redis store with the given store factory
 func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
 	return &redisStore{
 		dictStore:  data_structure.CreateDict(),
@@ -44,20 +44,31 @@ func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
 }
 
 // RunApplyLoop reads committed entries from the Raft node and applies them to the store.
-// This worker syncs all state-changing commands across Raft cluster nodes.
 func (s *redisStore) RunApplyLoop() {
 	for entry := range s.raftNode.ApplyChan() {
 		var cmd Command
 		if err := json.Unmarshal(entry.Data, &cmd); err != nil {
+			log.Printf("apply loop: unmarshal failed at index %d: %v", entry.Index, err)
 			continue
 		}
-		s.mu.Lock()
-		s.EvalAndResponse(&cmd)
-		s.mu.Unlock()
+		if cmd.Cmd == "" {
+			cmd.Cmd = entry.Cmd
+		}
+		if cmd.Cmd == "" {
+			log.Printf("missing command: %s", cmd)
+			continue
+		}
+		if _, err := s.EvalAndResponse(&cmd); err != nil {
+			log.Printf("apply loop: %s at index %d failed: %v", cmd.Cmd, entry.Index, err)
+		}
 	}
 }
 
+// EvalAndResponse executes cmd under the store lock.
+// Safe to call concurrently from HTTP handlers and RunApplyLoop.
 func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var res []byte
 	switch cmd.Cmd {
 	case "PING":
@@ -91,7 +102,6 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdSRAND(cmd.Args)
 	case "SPOP":
 		res = s.cmdSPOP(cmd.Args)
-
 	// Sorted set
 	case "ZADD":
 		res = s.cmdZADD(cmd.Args)
@@ -103,7 +113,7 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdZSCORE(cmd.Args)
 	case "ZCARD":
 		res = s.cmdZCARD(cmd.Args)
-	// Geo Hash
+	// Geo hash
 	case "GEOADD":
 		res = s.cmdGEOADD(cmd.Args)
 	case "GEODIST":
@@ -114,30 +124,28 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdGEOSEARCH(cmd.Args)
 	case "GEOPOS":
 		res = s.cmdGEOPOS(cmd.Args)
-
 	// Bloom filter
-	// case "BF_RESERVE":
-	// 	res = s.cmdBFRESERVE(cmd.Args)
-	// case "BF_INFO":
-	// 	res = s.cmdBFINFO(cmd.Args)
-	// case "BF_MADD":
-	// 	res = s.cmdBFMADD(cmd.Args)
-	// case "BF_EXISTS":
-	// 	res = s.cmdBFEXISTS(cmd.Args)
-	// case "BF_MEXISTS":
-	// 	res = s.cmdBFMEXISTS(cmd.Args)
-	// // Count-Min Sketch
-	// case "CMS_INITBYDIM":
-	// 	res = s.cmdCMSINITBYDIM(cmd.Args)
-	// case "CMS_INITBYPROB":
-	// 	res = s.cmdCMSINITBYPROB(cmd.Args)
-	// case "CMS_INCRBY":
-	// 	res = s.cmdCMSINCRBY(cmd.Args)
-	// case "CMS_QUERY":
-	// 	res = s.cmdCMSQUERY(cmd.Args)
+	case "BF_RESERVE":
+		res = s.cmdBFRESERVE(cmd.Args)
+	case "BF_INFO":
+		res = s.cmdBFINFO(cmd.Args)
+	case "BF_MADD":
+		res = s.cmdBFMADD(cmd.Args)
+	case "BF_EXISTS":
+		res = s.cmdBFEXISTS(cmd.Args)
+	case "BF_MEXISTS":
+		res = s.cmdBFMEXISTS(cmd.Args)
+	// Count-Min Sketch
+	case "CMS_INITBYDIM":
+		res = s.cmdCMSINITBYDIM(cmd.Args)
+	case "CMS_INITBYPROB":
+		res = s.cmdCMSINITBYPROB(cmd.Args)
+	case "CMS_INCRBY":
+		res = s.cmdCMSINCRBY(cmd.Args)
+	case "CMS_QUERY":
+		res = s.cmdCMSQUERY(cmd.Args)
 	default:
-		return nil, fmt.Errorf("not found")
+		return nil, fmt.Errorf("unknown command: %s", cmd.Cmd)
 	}
-	resp, _ := Decode(res)
-	return resp, nil
+	return Decode(res)
 }

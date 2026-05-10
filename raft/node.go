@@ -89,15 +89,16 @@ func NewRaftNode(cfg Config) (*RaftNode, error) {
 		cfg.HeartbeatTimeout = 50 * time.Millisecond
 	}
 
+	st := NewState(cfg.NodeID, cfg.StateFile)
 	node := &RaftNode{
 		nodeID:           cfg.NodeID,
 		peers:            cfg.Peers,
 		clientMap:        make(map[string]RaftRPCClient),
-		state:            NewState(cfg.NodeID, cfg.StateFile),
+		state:            st,
 		role:             FollowerRole,
 		log:              logWAL,
-		commitIndex:      -1,
-		lastApplied:      -1,
+		commitIndex:      st.CommitIndex(),
+		lastApplied:      st.LastApplied(),
 		electionTimeout:  cfg.ElectionTimeout,
 		heartbeatTimeout: cfg.HeartbeatTimeout,
 		nextIndex:        make(map[string]int64),
@@ -391,6 +392,7 @@ func (rn *RaftNode) advanceCommitIndex() {
 			entry := rn.log.GetEntry(n)
 			if entry != nil && entry.Term == rn.state.CurrentTerm() {
 				rn.commitIndex = n
+				rn.state.SetCommitIndex(n)
 				return
 			}
 		}
@@ -422,6 +424,13 @@ func (rn *RaftNode) GetCurrentTerm() int64 {
 // ApplyChan returns the apply channel for log entries
 func (rn *RaftNode) ApplyChan() <-chan LogEntry {
 	return rn.applyChan
+}
+
+// GetCommitIndex returns the current commit index.
+func (rn *RaftNode) GetCommitIndex() int64 {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	return rn.commitIndex
 }
 
 // RequestVote handles RequestVote RPC
@@ -623,6 +632,7 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, isH
 		logEntries := rn.log.GetEntries(nextIdx)
 		for _, entry := range logEntries {
 			entries = append(entries, &LogEntry{
+				Cmd:   entry.Cmd,
 				Term:  entry.Term,
 				Index: entry.Index,
 				Data:  entry.Data,
@@ -704,11 +714,15 @@ func (rn *RaftNode) applyLogEntries() {
 			entry := rn.log.GetEntry(rn.lastApplied)
 			if entry != nil {
 				toApply = append(toApply, wal.LogEntry{
+					Cmd:   entry.Cmd,
 					Term:  entry.Term,
 					Index: entry.Index,
 					Data:  entry.Data,
 				})
 			}
+		}
+		if len(toApply) > 0 {
+			rn.state.SetLastApplied(rn.lastApplied)
 		}
 		rn.mu.Unlock()
 

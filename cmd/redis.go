@@ -24,8 +24,7 @@ var RedisCmd = &cobra.Command{
 	Use:   "redis",
 	Short: "Start Raft node server (consensus only)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		StartRedisServer()
-		return nil
+		return StartRedisServer()
 	},
 }
 
@@ -80,7 +79,7 @@ func StartRedisServer() error {
 	// Parse peers
 	peersMap := make(map[string]string)
 	if peers != "" {
-		for _, peer := range strings.Split(peers, ",") {
+		for peer := range strings.SplitSeq(peers, ",") {
 			if peer == "" {
 				continue
 			}
@@ -195,7 +194,9 @@ func (s *RaftRedisServer) handleRequestVote(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reply)
+	if err := json.NewEncoder(w).Encode(reply); err != nil {
+		log.Printf("handleRequestVote: encode failed: %v", err)
+	}
 }
 
 // handleAppendEntries handles the /raft/append endpoint
@@ -218,7 +219,9 @@ func (s *RaftRedisServer) handleAppendEntries(w http.ResponseWriter, r *http.Req
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(reply)
+	if err := json.NewEncoder(w).Encode(reply); err != nil {
+		log.Printf("handleAppendEntries: encode failed: %v", err)
+	}
 }
 
 // handleHealth handles the /health endpoint
@@ -229,7 +232,9 @@ func (s *RaftRedisServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "healthy"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "healthy"}); err != nil {
+		log.Printf("handleHealth: encode failed: %v", err)
+	}
 }
 
 func isWriteCommand(cmd string) bool {
@@ -291,7 +296,9 @@ func (s *RaftRedisServer) handleCommand(w http.ResponseWriter, r *http.Request) 
 
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			log.Printf("[%s] failed to copy forwarded response: %v", s.NodeID, err)
+		}
 		return
 	}
 
@@ -366,5 +373,7 @@ func (s *RaftRedisServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	if err := json.NewEncoder(w).Encode(status); err != nil {
+		log.Printf("handleStatus: encode failed: %v", err)
+	}
 }
