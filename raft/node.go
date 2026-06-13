@@ -24,7 +24,8 @@ const (
 
 // RaftNode represents a Raft consensus node
 type RaftNode struct {
-	mu sync.RWMutex
+	mu         sync.RWMutex
+	commitCond *sync.Cond // broadcast when commitIndex advances
 
 	// RaftNode represents a Raft consensus node
 	// Note: peers map now contains HTTP URLs instead of gRPC addresses
@@ -109,6 +110,7 @@ func NewRaftNode(cfg Config) (*RaftNode, error) {
 		onStateChange:    cfg.OnStateChange,
 		onLogEntriesRead: cfg.OnLogEntriesRead,
 	}
+	node.commitCond = sync.NewCond(&node.mu)
 
 	// Initialize HTTP clients for peers
 	for peerID, addr := range cfg.Peers {
@@ -269,6 +271,7 @@ func (rn *RaftNode) Stop() {
 	rn.stopped = true
 	rn.mu.Unlock()
 	close(rn.stopChan)
+	rn.commitCond.Broadcast() // wake any blocked WaitCommit / applyLogEntries
 	rn.log.Close()
 }
 
@@ -358,23 +361,24 @@ func (rn *RaftNode) GetPeers() map[string]string {
 
 // WaitCommit blocks until commitIndex >= index or the context is done.
 func (rn *RaftNode) WaitCommit(ctx context.Context, index int64) error {
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
-	for {
+	// Wake the cond when ctx is cancelled so Wait() exits without polling.
+	stop := context.AfterFunc(ctx, func() { rn.commitCond.Broadcast() })
+	defer stop()
+
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+	for rn.commitIndex < index {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
 		case <-rn.stopChan:
 			return fmt.Errorf("node stopped")
-		case <-ticker.C:
-			rn.mu.RLock()
-			committed := rn.commitIndex >= index
-			rn.mu.RUnlock()
-			if committed {
-				return nil
-			}
+		default:
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rn.commitCond.Wait()
 	}
+	return nil
 }
 
 // advanceCommitIndex advances commitIndex to the highest index replicated
@@ -393,6 +397,7 @@ func (rn *RaftNode) advanceCommitIndex() {
 			if entry != nil && entry.Term == rn.state.CurrentTerm() {
 				rn.commitIndex = n
 				rn.state.SetCommitIndex(n)
+				rn.commitCond.Broadcast()
 				return
 			}
 		}
@@ -554,6 +559,7 @@ func (rn *RaftNode) AppendEntries(ctx context.Context, args *AppendEntriesArgs) 
 		} else {
 			rn.commitIndex = args.LeaderCommit
 		}
+		rn.commitCond.Broadcast()
 	}
 
 	return reply, nil
@@ -699,6 +705,8 @@ func (rn *RaftNode) sendAppendEntriesTo(peerID string, client RaftRPCClient, isH
 
 // applyLogEntries applies committed log entries to the state machine.
 func (rn *RaftNode) applyLogEntries() {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
 	for {
 		select {
 		case <-rn.stopChan:
@@ -706,8 +714,12 @@ func (rn *RaftNode) applyLogEntries() {
 		default:
 		}
 
-		// Collect entries to apply under the write lock, then send without holding it.
-		rn.mu.Lock()
+		if rn.commitIndex <= rn.lastApplied {
+			rn.commitCond.Wait()
+			continue
+		}
+
+		// Collect entries while holding the lock, then send without it.
 		var toApply []wal.LogEntry
 		for rn.commitIndex > rn.lastApplied {
 			rn.lastApplied++
@@ -730,6 +742,6 @@ func (rn *RaftNode) applyLogEntries() {
 			rn.applyChan <- e
 		}
 
-		time.Sleep(10 * time.Millisecond)
+		rn.mu.Lock()
 	}
 }

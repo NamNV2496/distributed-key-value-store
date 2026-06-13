@@ -33,8 +33,12 @@ type redisStore struct {
 }
 
 func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
+	return NewRedisStoreWithEviction(raftNode, data_structure.EvictFirst)
+}
+
+func NewRedisStoreWithEviction(raftNode *raft.RaftNode, evictStrategy int) IRedisStore {
 	return &redisStore{
-		dictStore:  data_structure.CreateDict(),
+		dictStore:  data_structure.CreateDictWithEviction(evictStrategy),
 		zsetStore:  data_structure.CreateZSetMap(),
 		setStore:   data_structure.CreateSetMap(),
 		cmsStore:   data_structure.CreateCMSMap(),
@@ -107,12 +111,30 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdZADD(cmd.Args)
 	case "ZRANK":
 		res = s.cmdZRANK(cmd.Args)
+	case "ZREVRANK":
+		res = s.cmdZREVRANK(cmd.Args)
+	case "ZINCRBY":
+		res = s.cmdZINCRBY(cmd.Args)
 	case "ZREM":
 		res = s.cmdZREM(cmd.Args)
 	case "ZSCORE":
 		res = s.cmdZSCORE(cmd.Args)
 	case "ZCARD":
 		res = s.cmdZCARD(cmd.Args)
+	case "ZRANGE":
+		res = s.cmdZRANGE(cmd.Args)
+	case "ZREVRANGE":
+		res = s.cmdZREVRANGE(cmd.Args)
+	case "ZRANGEBYSCORE":
+		res = s.cmdZRANGEBYSCORE(cmd.Args)
+	case "ZREVRANGEBYSCORE":
+		res = s.cmdZREVRANGEBYSCORE(cmd.Args)
+	case "ZCOUNT":
+		res = s.cmdZCOUNT(cmd.Args)
+	case "ZPOPMAX":
+		res = s.cmdZPOPMAX(cmd.Args)
+	case "ZPOPMIN":
+		res = s.cmdZPOPMIN(cmd.Args)
 	// Geo hash
 	case "GEOADD":
 		res = s.cmdGEOADD(cmd.Args)

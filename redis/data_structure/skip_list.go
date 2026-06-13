@@ -274,6 +274,39 @@ func (sl *Skiplist) FindFirstInRange(zr ZRange) *SkiplistNode {
 	return x
 }
 
+// GetNodeByRank returns the node at the given 1-based rank, or nil.
+func (sl *Skiplist) GetNodeByRank(rank uint32) *SkiplistNode {
+	x := sl.head
+	var traversed uint32 = 0
+	for i := sl.level - 1; i >= 0; i-- {
+		for x.levels[i].forward != nil && traversed+x.levels[i].span <= rank {
+			traversed += x.levels[i].span
+			x = x.levels[i].forward
+		}
+		if traversed == rank && x != sl.head {
+			return x
+		}
+	}
+	return nil
+}
+
+// FindLastInRange returns the last node with score inside zr, or nil.
+func (sl *Skiplist) FindLastInRange(zr ZRange) *SkiplistNode {
+	if !sl.InRange(zr) {
+		return nil
+	}
+	x := sl.head
+	for i := sl.level - 1; i >= 0; i-- {
+		for x.levels[i].forward != nil && zr.ValueLteMax(x.levels[i].forward.score) {
+			x = x.levels[i].forward
+		}
+	}
+	if !zr.ValueGteMin(x.score) {
+		return nil
+	}
+	return x
+}
+
 func (sl *Skiplist) InRange(zr ZRange) bool {
 	if zr.min > zr.max || (zr.min == zr.max && (zr.minex || zr.maxex)) {
 		return false

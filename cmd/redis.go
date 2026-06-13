@@ -17,6 +17,7 @@ import (
 
 	"github.com/namnv2496/go-redis-raft/raft"
 	"github.com/namnv2496/go-redis-raft/redis"
+	"github.com/namnv2496/go-redis-raft/redis/data_structure"
 	"github.com/spf13/cobra"
 )
 
@@ -60,6 +61,7 @@ func StartRedisServer() error {
 	peers := getEnv("PEERS", "")
 	logFile := getEnv("LOGFILE", "")
 	stateFile := getEnv("STATEFILE", "")
+	evictPolicy := getEnv("EVICT_POLICY", "noeviction") // noeviction | lru | lfu
 
 	// Parse port
 	var port int
@@ -115,7 +117,14 @@ func StartRedisServer() error {
 	if err != nil {
 		return fmt.Errorf("failed to create raft node: %w", err)
 	}
-	redisStore := redis.NewRedisStore(raftNode)
+	evictStrategy := data_structure.EvictFirst
+	switch evictPolicy {
+	case "lru":
+		evictStrategy = data_structure.EvictLRU
+	case "lfu":
+		evictStrategy = data_structure.EvictLFU
+	}
+	redisStore := redis.NewRedisStoreWithEviction(raftNode, evictStrategy)
 	server, err := NewRaftRedisServer(nodeID, raftNode, redisStore, peersMap)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
@@ -239,7 +248,12 @@ func (s *RaftRedisServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func isWriteCommand(cmd string) bool {
 	switch cmd {
-	case "SET", "DEL", "EXPIRE", "INCR", "ZADD", "ZREM", "GEOADD":
+	case "SET", "DEL", "EXPIRE", "INCR",
+		"SADD", "SREM", "SPOP",
+		"ZADD", "ZREM", "ZINCRBY", "ZPOPMAX", "ZPOPMIN",
+		"GEOADD",
+		"BF_RESERVE", "BF_MADD",
+		"CMS_INITBYDIM", "CMS_INITBYPROB", "CMS_INCRBY":
 		return true
 	default:
 		return false
