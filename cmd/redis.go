@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -37,6 +34,18 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
+func getThreadCount() int {
+	threads := getEnv("THREADS", "3")
+	if threads == "" {
+		threads = "0"
+	}
+	value, err := strconv.Atoi(threads)
+	if err != nil || value <= 0 {
+		return 4
+	}
+	return value
+}
+
 type ServerConfig struct {
 	NodeID    string
 	Port      int
@@ -44,14 +53,6 @@ type ServerConfig struct {
 	LogFile   string
 	StateFile string
 	DataFile  string
-}
-
-type RaftRedisServer struct {
-	NodeID     string
-	raftNode   *raft.RaftNode
-	redisStore redis.IRedisStore
-	peers      map[string]string
-	kvMu       sync.RWMutex
 }
 
 func StartRedisServer() error {
@@ -125,23 +126,38 @@ func StartRedisServer() error {
 		evictStrategy = data_structure.EvictLFU
 	}
 	redisStore := redis.NewRedisStoreWithEviction(raftNode, evictStrategy)
-	server, err := NewRaftRedisServer(nodeID, raftNode, redisStore, peersMap)
+	server, err := redis.NewRaftRedisServer(nodeID, raftNode, redisStore, peersMap)
 	if err != nil {
 		log.Fatalf("Failed to create server: %v", err)
 	}
+	server.StartExecutionLoop()
 
 	// Start HTTP server for Raft consensus
 	go func() {
 		mux := http.NewServeMux()
-		mux.HandleFunc("/raft/vote", server.handleRequestVote)
-		mux.HandleFunc("/raft/append", server.handleAppendEntries)
-		mux.HandleFunc("/raft/command", server.handleCommand)
-		mux.HandleFunc("/health", server.handleHealth)
-		mux.HandleFunc("/status", server.handleStatus)
+		mux.HandleFunc("/raft/vote", server.HandleRequestVote)
+		mux.HandleFunc("/raft/append", server.HandleAppendEntries)
+		mux.HandleFunc("/raft/command", server.HandleCommand)
+		mux.HandleFunc("/health", server.HandleHealth)
+		mux.HandleFunc("/status", server.HandleStatus)
 
-		addr := fmt.Sprintf(":%d", port)
+		workerThreads := getThreadCount()
+		if workerThreads > 0 {
+			runtime.GOMAXPROCS(workerThreads)
+			log.Printf("[%s] configuring HTTP server with %d worker threads", nodeID, workerThreads)
+		}
+
+		srv := &http.Server{
+			Addr:              fmt.Sprintf(":%d", port),
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
+		addr := srv.Addr
 		log.Printf("[%s] Raft HTTP server listening on %s", nodeID, addr)
-		if err := http.ListenAndServe(addr, mux); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[%s] HTTP server error: %v", nodeID, err)
 		}
 	}()
@@ -159,235 +175,4 @@ func StartRedisServer() error {
 
 	// Keep running
 	select {}
-}
-
-func NewRaftRedisServer(
-	nodeID string,
-	raftNode *raft.RaftNode,
-	redisStore redis.IRedisStore,
-	peers map[string]string,
-) (*RaftRedisServer, error) {
-	raftNode.Start()
-	return &RaftRedisServer{
-		NodeID:     nodeID,
-		raftNode:   raftNode,
-		redisStore: redisStore,
-		peers:      peers,
-		kvMu:       sync.RWMutex{},
-	}, nil
-}
-
-// Stop gracefully stops the server
-func (s *RaftRedisServer) Stop() {
-	if s.raftNode != nil {
-		s.raftNode.Stop()
-	}
-}
-
-func (s *RaftRedisServer) handleRequestVote(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var args raft.RequestVoteArgs
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to decode request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	reply, err := s.raftNode.RequestVote(r.Context(), &args)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("RequestVote failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(reply); err != nil {
-		log.Printf("handleRequestVote: encode failed: %v", err)
-	}
-}
-
-// handleAppendEntries handles the /raft/append endpoint
-func (s *RaftRedisServer) handleAppendEntries(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var args raft.AppendEntriesArgs
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
-		http.Error(w, fmt.Sprintf("Failed to decode request: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	reply, err := s.raftNode.AppendEntries(r.Context(), &args)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("AppendEntries failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(reply); err != nil {
-		log.Printf("handleAppendEntries: encode failed: %v", err)
-	}
-}
-
-// handleHealth handles the /health endpoint
-func (s *RaftRedisServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "healthy"}); err != nil {
-		log.Printf("handleHealth: encode failed: %v", err)
-	}
-}
-
-func isWriteCommand(cmd string) bool {
-	switch cmd {
-	case "SET", "DEL", "EXPIRE", "INCR",
-		"SADD", "SREM", "SPOP",
-		"ZADD", "ZREM", "ZINCRBY", "ZPOPMAX", "ZPOPMIN",
-		"GEOADD",
-		"BF_RESERVE", "BF_MADD",
-		"CMS_INITBYDIM", "CMS_INITBYPROB", "CMS_INCRBY":
-		return true
-	default:
-		return false
-	}
-}
-
-func (s *RaftRedisServer) leaderURL() (string, error) {
-	leaderID := s.raftNode.GetLeaderID()
-	if leaderID == "" {
-		return "", fmt.Errorf("leader unknown")
-	}
-
-	addr, ok := s.peers[leaderID]
-	if !ok {
-		return "", fmt.Errorf("leader address not found for %s", leaderID)
-	}
-	return addr, nil
-}
-
-func (s *RaftRedisServer) forwardToLeader(ctx context.Context, body []byte) (*http.Response, error) {
-	leaderURL, err := s.leaderURL()
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, leaderURL+"/raft/command", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	return http.DefaultClient.Do(req)
-}
-
-func (s *RaftRedisServer) handleCommand(w http.ResponseWriter, r *http.Request) {
-	leaderID := s.raftNode.GetLeaderID()
-	if leaderID == "" {
-		http.Error(w, "leader unknown", http.StatusServiceUnavailable)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	if leaderID != s.NodeID {
-		resp, err := s.forwardToLeader(r.Context(), body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to forward to leader: %v", err), http.StatusServiceUnavailable)
-			return
-		}
-		defer resp.Body.Close()
-
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			log.Printf("[%s] failed to copy forwarded response: %v", s.NodeID, err)
-		}
-		return
-	}
-
-	var commandReq redis.Command
-	if err := json.Unmarshal(body, &commandReq); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	if isWriteCommand(commandReq.Cmd) {
-		index, err := s.raftNode.Propose(commandReq.Cmd, body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to propose command: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		if err := s.raftNode.WaitCommit(r.Context(), index); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to wait for command commit: %v", err), http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(map[string]any{
-			"node_id": s.NodeID,
-			"result":  "OK",
-		}); err != nil {
-			log.Printf("[%s] Failed to encode response: %v", s.NodeID, err)
-		}
-		return
-	}
-
-	result, err := s.redisStore.EvalAndResponse(&commandReq)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Command failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{
-		"node_id": s.NodeID,
-		"result":  result,
-	}); err != nil {
-		log.Printf("[%s] Failed to encode response: %v", s.NodeID, err)
-	}
-}
-
-// handleStatus handles the /status endpoint
-func (s *RaftRedisServer) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	role := s.raftNode.GetRole()
-	roleStr := "unknown"
-	switch role {
-	case raft.FollowerRole:
-		roleStr = "follower"
-	case raft.CandidateRole:
-		roleStr = "candidate"
-	case raft.LeaderRole:
-		roleStr = "leader"
-	}
-
-	status := map[string]any{
-		"node_id":   s.NodeID,
-		"role":      roleStr,
-		"leader_id": s.raftNode.GetLeaderID(),
-		"is_leader": role == raft.LeaderRole,
-		"term":      s.raftNode.GetCurrentTerm(),
-		"timestamp": time.Now().Unix(),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(status); err != nil {
-		log.Printf("handleStatus: encode failed: %v", err)
-	}
 }

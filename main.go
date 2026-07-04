@@ -13,7 +13,7 @@ func main() {
 
 func Execute() error {
 	rootCmd := &cobra.Command{
-		Short: "A simple mock tool",
+		Short: "A simple redis using raft and multiple IO",
 	}
 	rootCmd.AddCommand(cmd.RedisCmd)
 	return rootCmd.Execute()

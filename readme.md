@@ -4,36 +4,72 @@ A distributed key-value store built from scratch in Go, using the **Raft consens
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│          REST API Gateway (service)           │
-│  POST /redis/set   GET /redis/get            │
-│  POST /redis/del   GET  /cluster/status       │
-└──────────────────────┬───────────────────────┘
-                       │  discovers leader, forwards writes /raft/command
-                       | 
-                       ▼
-┌──────────────────────────────────────────────┐
-│          Raft Consensus Nodes                 │
-│                                              │
-│   node1 (leader)   node2       node3         │
-│   ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-│   │ RaftNode │  │ RaftNode │  │ RaftNode │  │
-│   │ KV store │  │ KV store │  │ KV store │  │
-│   │ WAL log  │  │ WAL log  │  │ WAL log  │  │
-│   └──────────┘  └──────────┘  └──────────┘  │
-│        │  replicates log entries             │
-│        └──────────────┬──────────────────────┘
-│                       │ all nodes apply committed entries
-└──────────────────────────────────────────────┘
+The system is organized around three cooperating layers:
+
+1. **Client-facing HTTP layer** — accepts requests, parses payloads, and hands work to the execution pipeline.
+2. **Single-writer execution pipeline** — a dedicated execution loop processes commands in order so shared state is mutated through one serialized path.
+3. **Raft cluster layer** — the leader appends to the WAL, replicates to peers, waits for quorum commit, and applies committed entries to the local store.
+
+```text
+Clients
+  │
+  ▼
+HTTP handlers
+  │
+  ▼
+Command queue
+  │
+  ▼
+Single execution loop
+  │
+  ├─ Raft proposal / commit
+  └─ Local store update
+        │
+        ▼
+   Raft peers / WAL
 ```
 
-**Three components:**
+In the default deployment, three Raft nodes run together as a quorum-based cluster: node1, node2, and node3. Each node uses the same request intake and execution pipeline, while the leader is responsible for replication and commit ordering.
 
-| Component | Binary flag | Default port | Role |
-|---|---|---|---|
-| Raft node | `redis` | 5000 | Consensus, log replication, KV state machine |
-| REST gateway | `service` | 8000 | Forwards client requests to the leader |
+### Endpoint flow
+
+```mermaid
+flowchart TD
+    C[Client] --> H1[GET /health]
+    C --> H2[GET /status]
+    C --> H3[POST /raft/vote]
+    C --> H4[POST /raft/append]
+    C --> H5[POST /raft/command]
+
+    H1 --> Q[Command queue]
+    H2 --> Q
+    H3 --> Q
+    H4 --> Q
+    H5 --> Q
+
+    Q --> E[Single execution loop]
+    E --> P{Read or write?}
+
+    P -->|Read| S[Execute against local store]
+    P -->|Write| R[Propose to Raft]
+
+    R --> W[Wait for quorum commit]
+    W --> A[Apply committed entry]
+    A --> RESP[HTTP response]
+
+    S --> RESP
+```
+
+### Follower-to-leader forwarding
+
+```mermaid
+flowchart TD
+    F[Follower node] -->|POST /raft/command| L[Leader node]
+    L --> Q[Single execution loop]
+    Q --> R[Propose / replicate / commit]
+    R --> A[Apply to local state]
+    A --> RESP[Return result to client]
+```
 
 ## Features
 

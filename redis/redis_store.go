@@ -68,11 +68,30 @@ func (s *redisStore) RunApplyLoop() {
 	}
 }
 
+func isReadOnlyCommand(cmd string) bool {
+	switch cmd {
+	case "PING", "GET", "TTL",
+		"SCARD", "SMEMBERS", "SISMEMBER", "SMISMEMBER", "SRAND",
+		"ZRANK", "ZREVRANK", "ZSCORE", "ZCARD", "ZRANGE", "ZREVRANGE",
+		"ZRANGEBYSCORE", "ZREVRANGEBYSCORE", "ZCOUNT",
+		"GEODIST", "GEOHASH", "GEOSEARCH", "GEOPOS",
+		"BF_INFO", "BF_EXISTS", "BF_MEXISTS", "CMS_QUERY":
+		return true
+	default:
+		return false
+	}
+}
+
 // EvalAndResponse executes cmd under the store lock.
 // Safe to call concurrently from HTTP handlers and RunApplyLoop.
 func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if isReadOnlyCommand(cmd.Cmd) {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+	} else {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
 	var res []byte
 	switch cmd.Cmd {
 	case "PING":
