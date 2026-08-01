@@ -82,13 +82,20 @@ func DecodeOne(data []byte) (any, int, error) {
 		return readArray(data)
 	case '@':
 		return readIntArray(data)
+	default:
+		return readSimpleString(data)
 	}
-	return nil, 0, nil
 }
 
 func Decode(data []byte) (any, error) {
 	res, _, err := DecodeOne(data)
-	return res, err
+	if err != nil {
+		return nil, err
+	}
+	if e, ok := res.(error); ok {
+		return nil, e
+	}
+	return res, nil
 }
 
 func encodeString(s string) []byte {
@@ -137,6 +144,8 @@ func Encode(value any, isSimpleString bool) []byte {
 			buf.Write([]byte(fmt.Sprintf("%d|", n)))
 		}
 		return []byte(fmt.Sprintf("@%s", buf.Bytes()))
+	case any:
+		return []byte(fmt.Sprintf("+%s%s", v, CRLF))
 	default:
 		return RespNil
 	}
@@ -170,8 +179,12 @@ func readInt64(data []byte) (int64, int, error) {
 	return res, pos + 2, nil
 }
 
-func readError(data []byte) (string, int, error) {
-	return readSimpleString(data)
+func readError(data []byte) (any, int, error) {
+	msg, pos, err := readSimpleString(data)
+	if err != nil {
+		return nil, 0, err
+	}
+	return errors.New(msg), pos, nil
 }
 
 // $5\r\nhello\r\n => 5, 4

@@ -23,13 +23,14 @@ type IRedisStore interface {
 }
 
 type redisStore struct {
-	raftNode   *raft.RaftNode
-	dictStore  *data_structure.Dict
-	zsetStore  map[string]data_structure.IZSet
-	setStore   map[string]data_structure.ISet
-	cmsStore   map[string]data_structure.ICMS
-	bloomStore map[string]data_structure.IBloomFilter
-	mu         sync.RWMutex
+	raftNode      *raft.RaftNode
+	dictStore     *data_structure.Dict
+	zsetStore     map[string]data_structure.IZSet
+	skiplistStore map[string]data_structure.ISkipList
+	setStore      map[string]data_structure.ISet
+	cmsStore      map[string]data_structure.ICMS
+	bloomStore    map[string]data_structure.IBloomFilter
+	mu            sync.RWMutex
 }
 
 func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
@@ -38,12 +39,13 @@ func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
 
 func NewRedisStoreWithEviction(raftNode *raft.RaftNode, evictStrategy int) IRedisStore {
 	return &redisStore{
-		dictStore:  data_structure.CreateDictWithEviction(evictStrategy),
-		zsetStore:  data_structure.CreateZSetMap(),
-		setStore:   data_structure.CreateSetMap(),
-		cmsStore:   data_structure.CreateCMSMap(),
-		bloomStore: data_structure.CreateBloomFilterMap(),
-		raftNode:   raftNode,
+		dictStore:     data_structure.CreateDictWithEviction(evictStrategy),
+		zsetStore:     data_structure.CreateZSetMap(),
+		skiplistStore: data_structure.CreateSkipListRanking(),
+		setStore:      data_structure.CreateSetMap(),
+		cmsStore:      data_structure.CreateCMSMap(),
+		bloomStore:    data_structure.CreateBloomFilterMap(),
+		raftNode:      raftNode,
 	}
 }
 
@@ -185,6 +187,23 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdCMSINCRBY(cmd.Args)
 	case "CMS_QUERY":
 		res = s.cmdCMSQUERY(cmd.Args)
+	// skiplist for leaderboard
+	case "SL_ADD":
+		res = s.cmdSLAdd(cmd.Args)
+	case "SL_GETRANK":
+		res = s.cmdSLGetRank(cmd.Args)
+	case "SL_DELETE":
+		res = s.cmdSLDelete(cmd.Args)
+	case "SL_GET_BY_RANK":
+		res = s.cmdSLGetByRank(cmd.Args)
+	case "SL_GET_RANK_BY_NAME":
+		res = s.cmdSLGetRankByName(cmd.Args)
+	case "SL_GET_RANK_RANGE":
+		res = s.cmdSLGetRankRange(cmd.Args)
+	case "SL_GET_SCORE_RANGE":
+		res = s.cmdSLGetScoreRang(cmd.Args)
+	case "SL_LEN":
+		res = s.cmdSLLen(cmd.Args)
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmd.Cmd)
 	}

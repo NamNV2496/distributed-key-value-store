@@ -27,6 +27,14 @@ type commandResponse struct {
 	err    error
 }
 
+type commandHTTPResponse struct {
+	NodeID  string `json:"node_id"`
+	Command string `json:"command,omitempty"`
+	Status  string `json:"status"`
+	Result  any    `json:"result,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
 type RaftRedisServer struct {
 	NodeID        string
 	raftNode      *raft.RaftNode
@@ -104,14 +112,10 @@ func (s *RaftRedisServer) executeCommand(ctx context.Context, cmd string, body [
 		if err := s.raftNode.WaitCommit(ctx, index); err != nil {
 			return nil, err
 		}
-		return map[string]any{"node_id": s.NodeID, "result": "OK"}, nil
+		return "OK", nil
 	}
 
-	result, err := s.redisStore.EvalAndResponse(&commandReq)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"node_id": s.NodeID, "result": result}, nil
+	return s.redisStore.EvalAndResponse(&commandReq)
 }
 
 func (s *RaftRedisServer) Stop() {
@@ -239,6 +243,9 @@ func (s *RaftRedisServer) HandleCommand(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	var commandReq Command
+	_ = json.Unmarshal(body, &commandReq)
+
 	if leaderID != s.NodeID {
 		resp, err := s.forwardToLeader(r.Context(), body)
 		if err != nil {
@@ -272,14 +279,24 @@ func (s *RaftRedisServer) HandleCommand(w http.ResponseWriter, r *http.Request) 
 
 	select {
 	case resp := <-respCh:
+		w.Header().Set("Content-Type", "application/json")
 		if resp.err != nil {
-			http.Error(w, fmt.Sprintf("Command failed: %v", resp.err), http.StatusInternalServerError)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(commandHTTPResponse{
+				NodeID:  s.NodeID,
+				Command: commandReq.Cmd,
+				Status:  "error",
+				Error:   resp.err.Error(),
+			})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(resp.result); err != nil {
-			log.Printf("[%s] Failed to encode response: %v", s.NodeID, err)
-		}
+
+		_ = json.NewEncoder(w).Encode(commandHTTPResponse{
+			NodeID:  s.NodeID,
+			Command: commandReq.Cmd,
+			Status:  "success",
+			Result:  resp.result,
+		})
 	case <-r.Context().Done():
 		http.Error(w, "request cancelled", http.StatusRequestTimeout)
 	}
