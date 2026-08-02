@@ -2,5 +2,5 @@
 fmt:
 	go fmt ./...
 test:
-	go test ./...
+	go test ./... -race 200
 

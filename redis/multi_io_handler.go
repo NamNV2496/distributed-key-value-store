@@ -14,6 +14,9 @@ import (
 	"github.com/namnv2496/go-redis-raft/raft"
 )
 
+// maxCommandBodyBytes bounds a single client command payload.
+const maxCommandBodyBytes = 8 << 20 // 8 MiB
+
 type commandRequest struct {
 	cmd       string
 	body      []byte
@@ -109,12 +112,28 @@ func (s *RaftRedisServer) executeCommand(ctx context.Context, cmd string, body [
 		if err != nil {
 			return nil, err
 		}
-		if err := s.raftNode.WaitCommit(ctx, index); err != nil {
+		if err := s.raftNode.WaitApplied(ctx, index); err != nil {
 			return nil, err
 		}
-		return "OK", nil
+		result, applyErr, ok := s.redisStore.TakeResult(index)
+		if !ok {
+			return "OK", nil // result aged out of the ring; the write did commit
+		}
+		if applyErr != nil {
+			return nil, applyErr
+		}
+		return result, nil
 	}
 
+	readIndex, err := s.raftNode.ReadIndex(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if readIndex >= 0 {
+		if err := s.raftNode.WaitApplied(ctx, readIndex); err != nil {
+			return nil, err
+		}
+	}
 	return s.redisStore.EvalAndResponse(&commandReq)
 }
 
@@ -196,7 +215,8 @@ func isWriteCommand(cmd string) bool {
 		"ZADD", "ZREM", "ZINCRBY", "ZPOPMAX", "ZPOPMIN",
 		"GEOADD",
 		"BF_RESERVE", "BF_MADD",
-		"CMS_INITBYDIM", "CMS_INITBYPROB", "CMS_INCRBY":
+		"CMS_INITBYDIM", "CMS_INITBYPROB", "CMS_INCRBY",
+		"SL_ADD", "SL_DELETE":
 		return true
 	default:
 		return false
@@ -237,7 +257,7 @@ func (s *RaftRedisServer) HandleCommand(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxCommandBodyBytes))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to read body: %v", err), http.StatusBadRequest)
 		return
@@ -245,7 +265,11 @@ func (s *RaftRedisServer) HandleCommand(w http.ResponseWriter, r *http.Request) 
 
 	var commandReq Command
 	_ = json.Unmarshal(body, &commandReq)
-
+	// in case client direct call to replica node => forward to leadernode to handler
+	// leader: 5001
+	// replica: 5002
+	// replica: 5003
+	// client call 0.0.0.1:5002/command
 	if leaderID != s.NodeID {
 		resp, err := s.forwardToLeader(r.Context(), body)
 		if err != nil {

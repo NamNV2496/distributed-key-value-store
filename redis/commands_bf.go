@@ -15,28 +15,27 @@ func (s *redisStore) cmdBFRESERVE(args map[string]string) []byte {
 	key := args["key"]
 	errRate, err := strconv.ParseFloat(args["errRate"], 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("error rate must be a floating point number %s", args["errRate"])), false)
+		return Encode(fmt.Errorf("error rate must be a floating point number %s", args["errRate"]), false)
 	}
 	capacity, err := strconv.ParseUint(args["capacity"], 10, 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("capacity must be an integer number %s", args["capacity"])), false)
+		return Encode(fmt.Errorf("capacity must be an integer number %s", args["capacity"]), false)
 	}
-	var growthRate uint64 = data_structure.BfDefaultExpansion
 	if len(args) == 5 {
 		if args["expansion"] != "EXPANSION" {
 			return Encode(errors.New("(error) 4th param must be EXPANSION for 'BF.RESERVE' command"), false)
 		}
-		growthRate, err = strconv.ParseUint(args["growthRate"], 10, 32)
+		growthRate, err := strconv.ParseUint(args["growthRate"], 10, 32)
 		if err != nil {
-			return Encode(errors.New(fmt.Sprintf("growthRate must be an integer number %s", args["growthRate"])), false)
+			return Encode(fmt.Errorf("growthRate must be an integer number %s", args["growthRate"]), false)
 		}
 		if growthRate < 1 {
-			return Encode(errors.New(fmt.Sprintf("growthRate should be greater or equal to 1 %d", growthRate)), false)
+			return Encode(fmt.Errorf("growthRate should be greater or equal to 1 %d", growthRate), false)
 		}
 	}
 	_, exist := s.bloomStore[key]
 	if exist {
-		return Encode(errors.New(fmt.Sprintf("Bloom filter with key '%s' already exist", key)), false)
+		return Encode(fmt.Errorf("Bloom filter with key '%s' already exist", key), false)
 	}
 	s.bloomStore[key] = data_structure.CreateBloomFilter(capacity, errRate)
 	return RespOk
@@ -47,13 +46,18 @@ func (s *redisStore) cmdBFINFO(args map[string]string) []byte {
 		return Encode(errors.New("(error) ERR wrong number of arguments for 'BF.INFO' command"), false)
 	}
 	key := args["key"]
-	_, exist := s.bloomStore[key]
+	bloom, exist := s.bloomStore[key]
 	if !exist {
-		return Encode(errors.New(fmt.Sprintf("Bloom filter with key '%s' does not exist", key)), false)
+		return Encode(fmt.Errorf("Bloom filter with key '%s' does not exist", key), false)
 	}
-	var res []string
-	// res = append(res, "Capacity", fmt.Sprintf("%d", sb.GetCapacity()))
 
+	res := []string{
+		"Capacity", fmt.Sprintf("%d", bloom.Capacity()),
+		"Size", fmt.Sprintf("%d", bloom.SizeBytes()),
+		"Number of hashes", fmt.Sprintf("%d", bloom.HashCount()),
+		"Error rate", strconv.FormatFloat(bloom.ErrorRate(), 'g', -1, 64),
+		"Number of items inserted", fmt.Sprintf("%d", bloom.Inserted()),
+	}
 	return Encode(res, false)
 }
 
@@ -64,8 +68,10 @@ func (s *redisStore) cmdBFMADD(args map[string]string) []byte {
 	key := args["key"]
 	bloom, exist := s.bloomStore[key]
 	if !exist {
-		bloom = data_structure.CreateBloomFilter(data_structure.BfDefaultInitCapacity,
-			data_structure.BfDefaultErrRate)
+		bloom = data_structure.CreateBloomFilter(
+			data_structure.BfDefaultInitCapacity,
+			data_structure.BfDefaultErrRate,
+		)
 		s.bloomStore[key] = bloom
 	}
 	var res []string

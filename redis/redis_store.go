@@ -2,6 +2,7 @@ package redis
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -10,16 +11,24 @@ import (
 	"github.com/namnv2496/go-redis-raft/redis/data_structure"
 )
 
-// Command represents a Redis command serialized in Raft log
+const applyResultRing = 1024
+
 type Command struct {
 	Cmd  string            `json:"cmd,omitempty"`
 	Args map[string]string `json:"args,omitempty"`
 }
 
-// IRedisStore is the interface for the Redis store with Raft integration
 type IRedisStore interface {
 	RunApplyLoop()
 	EvalAndResponse(cmd *Command) (any, error)
+	TakeResult(index int64) (any, error, bool)
+}
+
+type applyResult struct {
+	index  int64
+	result any
+	err    error
+	set    bool
 }
 
 type redisStore struct {
@@ -31,12 +40,13 @@ type redisStore struct {
 	cmsStore      map[string]data_structure.ICMS
 	bloomStore    map[string]data_structure.IBloomFilter
 	rateLimiters  map[string]*rateLimiterState
-	pubSub        map[string]map[string]chan string
+	subscribers   map[string]*subscriber
+	channelSubs   map[string]map[string]struct{}
+	patternSubs   map[string]map[string]struct{}
+	nextSubID     uint64
 	mu            sync.RWMutex
-}
-
-func NewRedisStore(raftNode *raft.RaftNode) IRedisStore {
-	return NewRedisStoreWithEviction(raftNode, data_structure.EvictFirst)
+	resultsMu     sync.Mutex
+	results       [applyResultRing]applyResult
 }
 
 func NewRedisStoreWithEviction(raftNode *raft.RaftNode, evictStrategy int) IRedisStore {
@@ -48,30 +58,61 @@ func NewRedisStoreWithEviction(raftNode *raft.RaftNode, evictStrategy int) IRedi
 		cmsStore:      data_structure.CreateCMSMap(),
 		bloomStore:    data_structure.CreateBloomFilterMap(),
 		rateLimiters:  make(map[string]*rateLimiterState),
-		pubSub:        make(map[string]map[string]chan string),
+		subscribers:   make(map[string]*subscriber),
+		channelSubs:   make(map[string]map[string]struct{}),
+		patternSubs:   make(map[string]map[string]struct{}),
 		raftNode:      raftNode,
+		mu:            sync.RWMutex{},
+		resultsMu:     sync.Mutex{},
+		results:       [applyResultRing]applyResult{},
 	}
 }
 
-// RunApplyLoop reads committed entries from the Raft node and applies them to the store.
 func (s *redisStore) RunApplyLoop() {
 	for entry := range s.raftNode.ApplyChan() {
-		var cmd Command
+		result, err := s.applyEntry(entry)
+		if err != nil {
+			log.Printf("apply loop: index %d (%s) failed: %v", entry.Index, entry.Cmd, err)
+		}
+		s.recordResult(entry.Index, result, err)
+		s.raftNode.MarkApplied(entry.Index)
+	}
+}
+
+func (s *redisStore) applyEntry(entry raft.LogEntry) (any, error) {
+	if entry.Cmd == raft.NoOpCommand {
+		return nil, nil
+	}
+
+	var cmd Command
+	if len(entry.Data) > 0 {
 		if err := json.Unmarshal(entry.Data, &cmd); err != nil {
-			log.Printf("apply loop: unmarshal failed at index %d: %v", entry.Index, err)
-			continue
-		}
-		if cmd.Cmd == "" {
-			cmd.Cmd = entry.Cmd
-		}
-		if cmd.Cmd == "" {
-			log.Printf("missing command: %s", cmd)
-			continue
-		}
-		if _, err := s.EvalAndResponse(&cmd); err != nil {
-			log.Printf("apply loop: %s at index %d failed: %v", cmd.Cmd, entry.Index, err)
+			return nil, fmt.Errorf("unmarshal: %w", err)
 		}
 	}
+	if cmd.Cmd == "" {
+		cmd.Cmd = entry.Cmd
+	}
+	if cmd.Cmd == "" {
+		return nil, errors.New("missing command")
+	}
+	return s.EvalAndResponse(&cmd)
+}
+
+func (s *redisStore) recordResult(index int64, result any, err error) {
+	s.resultsMu.Lock()
+	defer s.resultsMu.Unlock()
+	s.results[index%applyResultRing] = applyResult{index: index, result: result, err: err, set: true}
+}
+
+func (s *redisStore) TakeResult(index int64) (any, error, bool) {
+	s.resultsMu.Lock()
+	defer s.resultsMu.Unlock()
+	slot := s.results[index%applyResultRing]
+	if !slot.set || slot.index != index {
+		return nil, nil, false
+	}
+	return slot.result, slot.err, true
 }
 
 func isReadOnlyCommand(cmd string) bool {
@@ -88,8 +129,6 @@ func isReadOnlyCommand(cmd string) bool {
 	}
 }
 
-// EvalAndResponse executes cmd under the store lock.
-// Safe to call concurrently from HTTP handlers and RunApplyLoop.
 func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 	if isReadOnlyCommand(cmd.Cmd) {
 		s.mu.RLock()
@@ -207,6 +246,10 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdPSubscribe(cmd.Args)
 	case "PUNSUBSCRIBE":
 		res = s.cmdPUnsubscribe(cmd.Args)
+	case "POLL":
+		res = s.cmdPoll(cmd.Args)
+	case "PUBSUB_CHANNELS":
+		res = s.cmdPubSubChannels(cmd.Args)
 	// skiplist for leaderboard
 	case "SL_ADD":
 		res = s.cmdSLAdd(cmd.Args)
@@ -226,6 +269,9 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdSLLen(cmd.Args)
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmd.Cmd)
+	}
+	if err, ok := res.(error); ok {
+		return nil, err
 	}
 	if resBytes, ok := res.([]byte); ok {
 		return Decode(resBytes)

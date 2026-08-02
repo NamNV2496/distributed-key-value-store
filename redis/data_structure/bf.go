@@ -22,6 +22,13 @@ type IBloomFilter interface {
 	Exist(entry string) bool
 	AddHash(initHash HashValue)
 	ExistHash(initHash HashValue) bool
+
+	// Introspection, used by BF.INFO.
+	Capacity() uint64
+	SizeBytes() uint64
+	HashCount() int
+	ErrorRate() float64
+	Inserted() uint64
 }
 
 type BloomFilter struct {
@@ -32,7 +39,25 @@ type BloomFilter struct {
 	bf          []uint8
 	bits        uint64
 	bytes       uint64
+	inserted    uint64
 }
+
+// Capacity is the number of entries the filter was sized for.
+func (b *BloomFilter) Capacity() uint64 { return b.Entries }
+
+// SizeBytes is how much memory the bit array occupies.
+func (b *BloomFilter) SizeBytes() uint64 { return b.bytes }
+
+// HashCount is the number of hash functions per entry.
+func (b *BloomFilter) HashCount() int { return b.Hashes }
+
+// ErrorRate is the configured false-positive probability.
+func (b *BloomFilter) ErrorRate() float64 { return b.Error }
+
+// Inserted counts how many times an item has been added. Like Redis, this
+// counts add operations, not distinct members — a Bloom filter cannot tell
+// whether an item was already present.
+func (b *BloomFilter) Inserted() uint64 { return b.inserted }
 
 var _ IBloomFilter = &BloomFilter{}
 
@@ -86,6 +111,7 @@ func (b *BloomFilter) CalcHash(entry string) HashValue {
 
 func (b *BloomFilter) Add(entry string) {
 	var hash, bytePos uint64
+	b.inserted++
 	initHash := b.CalcHash(entry)
 	for i := 0; i < b.Hashes; i++ {
 		hash = (initHash.a + initHash.b*uint64(i)) % b.bits
@@ -109,6 +135,7 @@ func (b *BloomFilter) Exist(entry string) bool {
 
 func (b *BloomFilter) AddHash(initHash HashValue) {
 	var hash, bytePos uint64
+	b.inserted++
 	for i := 0; i < b.Hashes; i++ {
 		hash = (initHash.a + initHash.b*uint64(i)) % b.bits
 		bytePos = hash >> 3 // div 8

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/namnv2496/go-redis-raft/wal"
@@ -25,6 +24,13 @@ type RequestVoteArgs struct {
 	CandidateId  string
 	LastLogIndex int64
 	LastLogTerm  int64
+
+	// PreVote marks a hypothetical poll: "would you vote for me at Term?".
+	// The receiver answers without adopting Term and without recording a vote,
+	// so a node that is partitioned away cannot inflate the cluster's term by
+	// campaigning in a loop and then force a healthy leader to step down when
+	// the partition heals.
+	PreVote bool
 }
 
 // RequestVoteReply represents RequestVote RPC reply
@@ -54,9 +60,12 @@ type AppendEntriesReply struct {
 // LogEntry represents a single entry in the replicated log (alias for wal.LogEntry)
 type LogEntry = wal.LogEntry
 
-// HTTPRaftClient implements HTTP-based Raft RPC communication
+// HTTPRaftClient implements HTTP-based Raft RPC communication.
+//
+// It holds no mutex: http.Client is safe for concurrent use, and the lock this
+// used to take around every round trip serialised all RPCs to a peer, so one
+// slow AppendEntries blocked the heartbeats behind it.
 type HTTPRaftClient struct {
-	mu      sync.Mutex
 	baseURL string
 	client  *http.Client
 }
@@ -73,9 +82,6 @@ func NewRaftRPCClient(baseURL string) RaftRPCClient {
 
 // RequestVote sends a RequestVote RPC to a peer via HTTP
 func (c *HTTPRaftClient) RequestVote(ctx context.Context, args *RequestVoteArgs, _ ...interface{}) (*RequestVoteReply, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	data, err := json.Marshal(args)
 	if err != nil {
 		return nil, err
@@ -108,9 +114,6 @@ func (c *HTTPRaftClient) RequestVote(ctx context.Context, args *RequestVoteArgs,
 
 // AppendEntries sends an AppendEntries RPC to a peer via HTTP
 func (c *HTTPRaftClient) AppendEntries(ctx context.Context, args *AppendEntriesArgs, _ ...interface{}) (*AppendEntriesReply, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	data, err := json.Marshal(args)
 	if err != nil {
 		return nil, err

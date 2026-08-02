@@ -1,7 +1,6 @@
 package data_structure
 
 import (
-	"errors"
 	"fmt"
 	"math"
 )
@@ -95,7 +94,7 @@ var GeohashStandardRange = GeohashRange{
 func GeohashEncode(geohashRange GeohashRange, long float64, lat float64, step uint8) (*GeohashBits, error) {
 	if long > geohashRange.MaxLong || long < geohashRange.MinLong ||
 		lat > geohashRange.MaxLat || lat < geohashRange.MinLat {
-		return nil, errors.New(fmt.Sprintf("invalid coord: %f, %f", long, lat))
+		return nil, fmt.Errorf("invalid coord: %f, %f", long, lat)
 	}
 
 	res := &GeohashBits{

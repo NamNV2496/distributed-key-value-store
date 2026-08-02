@@ -109,12 +109,18 @@ func (zs *ZSet) GetRank(ele string, reverse bool) (rank int64, score float64) {
 	return rank, score
 }
 
+// GetScore returns (1, score) when ele is present and (0, 0) when it is not.
+//
+// The flag used to be inverted — 0 meant found and -1 meant missing — while
+// every caller tested it as "1 == found". The result was that ZSCORE returned
+// nil for members that existed, and GEODIST, GEOHASH, GEOPOS and GEOSEARCH
+// could never resolve a member at all.
 func (zs *ZSet) GetScore(ele string) (int, float64) {
 	score, exist := zs.dict[ele]
 	if !exist {
-		return -1, 0
+		return 0, 0
 	}
-	return 0, score
+	return 1, score
 }
 
 func (zs *ZSet) Len() int {

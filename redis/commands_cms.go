@@ -16,11 +16,11 @@ func (s *redisStore) cmdCMSINITBYDIM(args map[string]string) []byte {
 	key := args["key"]
 	width, err := strconv.ParseUint(args["width"], 10, 32)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("width must be a integer number %s", args["width"])), false)
+		return Encode(fmt.Errorf("width must be a integer number %s", args["width"]), false)
 	}
 	height, err := strconv.ParseUint(args["height"], 10, 32)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("height must be a integer number %s", args["height"])), false)
+		return Encode(fmt.Errorf("height must be a integer number %s", args["height"]), false)
 	}
 	_, exist := s.cmsStore[key]
 	if exist {
@@ -37,14 +37,14 @@ func (s *redisStore) cmdCMSINITBYPROB(args map[string]string) []byte {
 	key := args["key"]
 	errRate, err := strconv.ParseFloat(args["errRate"], 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("errRate must be a floating point number %s", args["errRate"])), false)
+		return Encode(fmt.Errorf("errRate must be a floating point number %s", args["errRate"]), false)
 	}
 	if errRate >= 1 || errRate <= 0 {
 		return Encode(errors.New("CMS: invalid overestimation value"), false)
 	}
 	probability, err := strconv.ParseFloat(args["probability"], 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("probability must be a floating poit number %s", args["probability"])), false)
+		return Encode(fmt.Errorf("probability must be a floating poit number %s", args["probability"]), false)
 	}
 	if probability >= 1 || probability <= 0 {
 		return Encode(errors.New("CMS: invalid prob value"), false)
@@ -71,7 +71,7 @@ func (s *redisStore) cmdCMSINCRBY(args map[string]string) []byte {
 
 	value, err := strconv.ParseUint(args["value"], 10, 32)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("increment must be a non negative integer number %s", args["value"])), false)
+		return Encode(fmt.Errorf("increment must be a non negative integer number %s", args["value"]), false)
 	}
 	count := cms.IncrBy(key, uint32(value))
 	if count == math.MaxUint32 {

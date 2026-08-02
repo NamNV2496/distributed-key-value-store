@@ -46,15 +46,6 @@ func getThreadCount() int {
 	return value
 }
 
-type ServerConfig struct {
-	NodeID    string
-	Port      int
-	Peers     map[string]string // nodeID -> HTTP URL
-	LogFile   string
-	StateFile string
-	DataFile  string
-}
-
 func StartRedisServer() error {
 	// Read from environment variables or use defaults
 	nodeID := getEnv("NODE", "node1")
@@ -62,7 +53,7 @@ func StartRedisServer() error {
 	peers := getEnv("PEERS", "")
 	logFile := getEnv("LOGFILE", "")
 	stateFile := getEnv("STATEFILE", "")
-	evictPolicy := getEnv("EVICT_POLICY", "noeviction") // noeviction | lru | lfu
+	evictPolicy := getEnv("EVICT_POLICY", "lru") // noeviction | lru | lfu
 
 	// Parse port
 	var port int

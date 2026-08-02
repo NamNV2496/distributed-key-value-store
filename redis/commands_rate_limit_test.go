@@ -3,7 +3,7 @@ package redis
 import "testing"
 
 func TestRateLimitInitAndCheck(t *testing.T) {
-	store := NewRedisStore(nil).(*redisStore)
+	store := NewRedisStoreWithEviction(nil, 0).(*redisStore)
 
 	initRes, err := store.EvalAndResponse(&Command{Cmd: "RATELIMIT_INIT", Args: map[string]string{"key": "foo", "limit": "2", "window_ms": "1000", "type": "fixed"}})
 	if err != nil {

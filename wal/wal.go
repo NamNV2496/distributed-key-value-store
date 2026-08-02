@@ -5,9 +5,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sync"
 )
+
+// maxEntryBytes bounds a single record so a corrupt length prefix cannot make
+// load() allocate an arbitrary amount of memory.
+const maxEntryBytes = 64 << 20 // 64 MiB
 
 // LogEntry represents a WAL entry
 type LogEntry struct {
@@ -50,7 +55,10 @@ func NewWAL(filename string) (*WAL, error) {
 	return wal, nil
 }
 
-// Append adds a new entry to the WAL
+// Append adds a new entry to the WAL and fsyncs it to stable storage before
+// returning. Raft may only acknowledge an entry once it survives a crash, so
+// this call is deliberately synchronous — buffered writes that live in the OS
+// page cache are not durable.
 func (w *WAL) Append(cmd string, term, index int64, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -64,25 +72,74 @@ func (w *WAL) Append(cmd string, term, index int64, data []byte) error {
 	if err := w.writeEntry(entry); err != nil {
 		return err
 	}
-	if err := w.writer.Flush(); err != nil {
-		return fmt.Errorf("failed to flush WAL: %w", err)
+	if err := w.sync(); err != nil {
+		return err
 	}
 	w.entries = append(w.entries, entry)
 	return nil
 }
 
-// GetEntries returns all entries from a given index
-func (w *WAL) GetEntries(fromIndex int64) []LogEntry {
+// AppendBatch appends every entry and fsyncs ONCE at the end.
+//
+// A follower receiving N entries in one AppendEntries RPC would otherwise pay N
+// fsyncs while the Raft mutex is held, which is both slow and enough to make
+// heartbeats miss their deadline and trigger spurious elections. One RPC, one
+// sync: the batch is still durable before the follower acknowledges it.
+func (w *WAL) AppendBatch(entries []LogEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	for _, entry := range entries {
+		if err := w.writeEntry(entry); err != nil {
+			return err
+		}
+	}
+	if err := w.sync(); err != nil {
+		return err
+	}
+	w.entries = append(w.entries, entries...)
+	return nil
+}
+
+// sync flushes the bufio layer and fsyncs the file. Caller must hold w.mu.
+func (w *WAL) sync() error {
+	if err := w.writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush WAL: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("failed to fsync WAL: %w", err)
+	}
+	return nil
+}
+
+// GetEntries returns at most limit entries starting at fromIndex.
+//
+// The result is a copy: returning a sub-slice of w.entries would alias the
+// backing array, which TruncateAfter and Append are free to reallocate or
+// overwrite while a caller still holds it.
+func (w *WAL) GetEntries(fromIndex int64, limit int) []LogEntry {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if fromIndex < 0 {
+		fromIndex = 0
+	}
 	if fromIndex >= int64(len(w.entries)) {
 		return []LogEntry{}
 	}
-	return w.entries[fromIndex:]
+	end := int64(len(w.entries))
+	if limit > 0 && fromIndex+int64(limit) < end {
+		end = fromIndex + int64(limit)
+	}
+	out := make([]LogEntry, end-fromIndex)
+	copy(out, w.entries[fromIndex:end])
+	return out
 }
 
-// GetEntry returns a specific entry
+// GetEntry returns a copy of a specific entry, or nil if the index is absent.
 func (w *WAL) GetEntry(index int64) *LogEntry {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -90,10 +147,11 @@ func (w *WAL) GetEntry(index int64) *LogEntry {
 	if index < 0 || index >= int64(len(w.entries)) {
 		return nil
 	}
-	return &w.entries[index]
+	entry := w.entries[index]
+	return &entry
 }
 
-// LastEntry returns the last entry in the log
+// LastEntry returns a copy of the last entry in the log.
 func (w *WAL) LastEntry() *LogEntry {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -101,7 +159,8 @@ func (w *WAL) LastEntry() *LogEntry {
 	if len(w.entries) == 0 {
 		return nil
 	}
-	return &w.entries[len(w.entries)-1]
+	entry := w.entries[len(w.entries)-1]
+	return &entry
 }
 
 // TruncateAfter removes all entries after the given index
@@ -123,39 +182,75 @@ func (w *WAL) TruncateAfter(index int64) error {
 	return w.rewrite()
 }
 
-// Load reads existing entries from file
+// load reads existing entries from file.
+//
+// It uses io.ReadFull so a short read can never silently truncate the log.
+// A partial record at the tail is the expected result of a crash mid-append:
+// that record is discarded and the file is truncated back to the last complete
+// entry, so the next Append starts from a clean boundary. A malformed record
+// anywhere before the tail means real corruption and is reported as an error.
 func (w *WAL) load() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if _, err := w.file.Seek(0, 0); err != nil {
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
 
 	reader := bufio.NewReader(w.file)
+	var validBytes int64
+
 	for {
 		lengthBuf := make([]byte, 4)
-		n, err := reader.Read(lengthBuf)
-		if n == 0 || err != nil {
-			break
-		}
-		if n != 4 {
-			break
+		if _, err := io.ReadFull(reader, lengthBuf); err != nil {
+			if err == io.EOF {
+				break // clean end of file
+			}
+			if err == io.ErrUnexpectedEOF {
+				break // torn length prefix — drop it
+			}
+			return fmt.Errorf("failed to read entry length: %w", err)
 		}
 
 		length := binary.BigEndian.Uint32(lengthBuf)
+		if length > maxEntryBytes {
+			return fmt.Errorf("wal corrupt: entry at offset %d declares %d bytes (max %d)",
+				validBytes, length, maxEntryBytes)
+		}
+
 		dataBuf := make([]byte, length)
-		n, err = reader.Read(dataBuf)
-		if n != int(length) || err != nil {
-			break
+		if _, err := io.ReadFull(reader, dataBuf); err != nil {
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break // torn payload — drop it
+			}
+			return fmt.Errorf("failed to read entry payload: %w", err)
 		}
 
 		var entry LogEntry
 		if err := json.Unmarshal(dataBuf, &entry); err != nil {
-			return fmt.Errorf("failed to unmarshal entry: %w", err)
+			return fmt.Errorf("wal corrupt: failed to unmarshal entry at offset %d: %w", validBytes, err)
 		}
 
 		w.entries = append(w.entries, entry)
+		validBytes += 4 + int64(length)
+	}
+
+	// Drop any trailing partial record left behind by a crash.
+	size, err := w.file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if size != validBytes {
+		if err := w.file.Truncate(validBytes); err != nil {
+			return fmt.Errorf("failed to truncate partial tail record: %w", err)
+		}
+		if _, err := w.file.Seek(validBytes, io.SeekStart); err != nil {
+			return err
+		}
+		w.writer.Reset(w.file)
+		if err := w.file.Sync(); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -182,10 +277,14 @@ func (w *WAL) writeEntry(entry LogEntry) error {
 	return nil
 }
 
-// rewrite truncates and rewrites the entire file
+// rewrite truncates and rewrites the entire file. Caller must hold w.mu.
 func (w *WAL) rewrite() error {
-	w.file.Truncate(0)
-	w.file.Seek(0, 0)
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	w.writer.Reset(w.file)
 
 	for _, entry := range w.entries {
@@ -194,7 +293,7 @@ func (w *WAL) rewrite() error {
 		}
 	}
 
-	return w.writer.Flush()
+	return w.sync()
 }
 
 // Close closes the WAL file
@@ -221,11 +320,15 @@ func (w *WAL) Clear() error {
 	defer w.mu.Unlock()
 
 	w.entries = make([]LogEntry, 0)
-	w.file.Truncate(0)
-	w.file.Seek(0, 0)
+	if err := w.file.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	w.writer.Reset(w.file)
 
-	return w.writer.Flush()
+	return w.sync()
 }
 
 // Len returns the number of entries

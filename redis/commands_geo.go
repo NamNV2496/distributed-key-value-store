@@ -32,11 +32,11 @@ func (s *redisStore) cmdGEOADD(args map[string]string) []byte {
 
 	lon, err := strconv.ParseFloat(lonStr, 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("lon value must be a floating point number %s", lonStr)), false)
+		return Encode(fmt.Errorf("lon value must be a floating point number %s", lonStr), false)
 	}
 	lat, err := strconv.ParseFloat(latStr, 64)
 	if err != nil {
-		return Encode(errors.New(fmt.Sprintf("lat value must be a floating point number %s", latStr)), false)
+		return Encode(fmt.Errorf("lat value must be a floating point number %s", latStr), false)
 	}
 
 	hash, err := data_structure.GeohashEncode(data_structure.GeohashCoordRange, lon, lat, data_structure.GeoMaxStep)

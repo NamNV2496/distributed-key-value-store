@@ -33,10 +33,6 @@ type Dict struct {
 	evictStrategy    int
 }
 
-func CreateDict() *Dict {
-	return CreateDictWithEviction(EvictFirst)
-}
-
 func CreateDictWithEviction(strategy int) *Dict {
 	return &Dict{
 		dictStore:        make(map[string]*Obj),
@@ -174,15 +170,12 @@ func (d *Dict) evictLRU() {
 	}
 }
 
-// evictLFU samples up to EvictSampleSize keys and removes the one with the
-// lowest frequency counter (after applying time-based decay).
 func (d *Dict) evictLFU() {
 	victim := ""
-	lowestFreq := ^uint32(0) // max uint32
+	lowestFreq := ^uint32(0)
 	sampled := 0
 	now := time.Now().UnixMilli()
 	for k, obj := range d.dictStore {
-		// Apply decay without mutating (we don't want a touch side-effect here).
 		freq := obj.frequency
 		elapsed := (now - obj.lastAccessMs) / 60_000
 		if elapsed > 0 {

@@ -92,9 +92,26 @@ func (s *redisStore) cmdGetTTL(args map[string]string) []byte {
 }
 
 func (s *redisStore) cmdDEL(args map[string]string) []byte {
-	delCount := 0
+	keys := make([]string, 0, len(args))
+	if key, ok := args["key"]; ok && key != "" {
+		keys = append(keys, key)
+	}
+	for i := 1; ; i++ {
+		key, ok := args[strconv.Itoa(i)]
+		if !ok {
+			break
+		}
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
 
-	for key := range args {
+	if len(keys) == 0 {
+		return Encode(errors.New("(error) ERR wrong number of arguments for 'DEL' command"), false)
+	}
+
+	delCount := 0
+	for _, key := range keys {
 		if ok := s.dictStore.Del(key); ok {
 			delCount++
 		}
