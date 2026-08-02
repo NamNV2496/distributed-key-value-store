@@ -30,6 +30,8 @@ type redisStore struct {
 	setStore      map[string]data_structure.ISet
 	cmsStore      map[string]data_structure.ICMS
 	bloomStore    map[string]data_structure.IBloomFilter
+	rateLimiters  map[string]*rateLimiterState
+	pubSub        map[string]map[string]chan string
 	mu            sync.RWMutex
 }
 
@@ -45,6 +47,8 @@ func NewRedisStoreWithEviction(raftNode *raft.RaftNode, evictStrategy int) IRedi
 		setStore:      data_structure.CreateSetMap(),
 		cmsStore:      data_structure.CreateCMSMap(),
 		bloomStore:    data_structure.CreateBloomFilterMap(),
+		rateLimiters:  make(map[string]*rateLimiterState),
+		pubSub:        make(map[string]map[string]chan string),
 		raftNode:      raftNode,
 	}
 }
@@ -94,7 +98,7 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 	}
-	var res []byte
+	var res any
 	switch cmd.Cmd {
 	case "PING":
 		res = s.cmdPING(cmd.Args)
@@ -187,6 +191,22 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 		res = s.cmdCMSINCRBY(cmd.Args)
 	case "CMS_QUERY":
 		res = s.cmdCMSQUERY(cmd.Args)
+	// rate limit
+	case "RATELIMIT_INIT":
+		res = s.cmdRateLimitInit(cmd.Args)
+	case "RATELIMIT_CHECK":
+		res = s.cmdRateLimitCheck(cmd.Args)
+	// pubsub
+	case "PUBLISH":
+		res = s.cmdPublish(cmd.Args)
+	case "SUBSCRIBE":
+		res = s.cmdSubscribe(cmd.Args)
+	case "UNSUBSCRIBE":
+		res = s.cmdUnsubscribe(cmd.Args)
+	case "PSUBSCRIBE":
+		res = s.cmdPSubscribe(cmd.Args)
+	case "PUNSUBSCRIBE":
+		res = s.cmdPUnsubscribe(cmd.Args)
 	// skiplist for leaderboard
 	case "SL_ADD":
 		res = s.cmdSLAdd(cmd.Args)
@@ -207,5 +227,8 @@ func (s *redisStore) EvalAndResponse(cmd *Command) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown command: %s", cmd.Cmd)
 	}
-	return Decode(res)
+	if resBytes, ok := res.([]byte); ok {
+		return Decode(resBytes)
+	}
+	return res, nil
 }

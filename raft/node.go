@@ -310,7 +310,17 @@ func (rn *RaftNode) Propose(cmd string, data []byte) (int64, error) {
 		rn.mu.Unlock()
 		return -1, err
 	}
+
+	if len(rn.clientMap) == 0 {
+		rn.commitIndex = index
+		rn.state.SetCommitIndex(index)
+		rn.commitCond.Broadcast()
+	}
 	rn.mu.Unlock()
+
+	if len(rn.clientMap) == 0 {
+		return index, nil
+	}
 
 	// Replicate immediately rather than waiting for the next heartbeat.
 	rn.sendAppendEntries(false)
@@ -367,6 +377,9 @@ func (rn *RaftNode) WaitCommit(ctx context.Context, index int64) error {
 
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
+	if len(rn.clientMap) == 0 && rn.role == LeaderRole && index <= rn.commitIndex {
+		return nil
+	}
 	for rn.commitIndex < index {
 		select {
 		case <-rn.stopChan:
