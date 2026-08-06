@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shard Dashboard</title>
+<link rel="stylesheet" href="dashboard.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#129513;</text></svg>">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>Shard Dashboard</h1>
+      <p class="brand-sub">served by <strong id="served-by">…</strong> · topology <strong id="topo-version">v?</strong></p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span id="conn" class="conn" data-state="connecting">connecting</span>
+    <span class="updated">updated <span id="updated">–</span></span>
+    <label class="toggle">
+      <input type="checkbox" id="live" checked>
+      <span>Live</span>
+    </label>
+    <button type="button" id="refresh" class="btn">Refresh</button>
+  </div>
+</header>
+
+<main>
+
+  <section class="stats" aria-label="Cluster summary">
+    <article class="stat">
+      <span class="stat-label">Shards</span>
+      <span class="stat-value" id="stat-shards">–</span>
+      <span class="stat-note" id="stat-shards-note">&nbsp;</span>
+    </article>
+    <article class="stat">
+      <span class="stat-label">Nodes</span>
+      <span class="stat-value" id="stat-nodes">–</span>
+      <span class="stat-note" id="stat-nodes-note">&nbsp;</span>
+    </article>
+    <article class="stat">
+      <span class="stat-label">Leaders elected</span>
+      <span class="stat-value" id="stat-leaders">–</span>
+      <span class="stat-note" id="stat-leaders-note">&nbsp;</span>
+    </article>
+    <article class="stat">
+      <span class="stat-label">Hash slots</span>
+      <span class="stat-value" id="stat-slots">–</span>
+      <span class="stat-note" id="stat-slots-note">&nbsp;</span>
+    </article>
+    <article class="stat">
+      <span class="stat-label">Migrating slots</span>
+      <span class="stat-value" id="stat-migrations">–</span>
+      <span class="stat-note" id="stat-migrations-note">&nbsp;</span>
+    </article>
+  </section>
+
+  <section class="panel" aria-labelledby="routing-title">
+    <div class="panel-head">
+      <h2 id="routing-title">Where does a request go?</h2>
+      <p class="panel-sub">A key is hashed to a slot, the slot belongs to a shard, and the shard's leader executes the write.</p>
+    </div>
+
+    <form class="route-form" id="route-form">
+      <label class="field">
+        <span>Key</span>
+        <input type="text" id="route-key" name="key" value="user:1000" placeholder="e.g. user:1000 or {cart}:items" autocomplete="off" spellcheck="false">
+      </label>
+      <button type="submit" class="btn btn-primary">Trace route</button>
+      <div class="samples" id="samples" aria-label="Sample keys"></div>
+    </form>
+
+    <div class="route-flow" id="route-flow" hidden>
+      <ol class="flow">
+        <li class="flow-step">
+          <span class="flow-kind">Request</span>
+          <span class="flow-main" id="flow-key">–</span>
+          <span class="flow-sub" id="flow-tag">&nbsp;</span>
+        </li>
+        <li class="flow-arrow" aria-hidden="true"><span>CRC16 mod N</span></li>
+        <li class="flow-step">
+          <span class="flow-kind">Slot</span>
+          <span class="flow-main" id="flow-slot">–</span>
+          <span class="flow-sub" id="flow-slot-range">&nbsp;</span>
+        </li>
+        <li class="flow-arrow" aria-hidden="true"><span>slot table</span></li>
+        <li class="flow-step" id="flow-shard-step">
+          <span class="flow-kind">Shard</span>
+          <span class="flow-main" id="flow-shard">–</span>
+          <span class="flow-sub" id="flow-shard-slots">&nbsp;</span>
+        </li>
+        <li class="flow-arrow" aria-hidden="true"><span>raft leader</span></li>
+        <li class="flow-step">
+          <span class="flow-kind">Handled by</span>
+          <span class="flow-main" id="flow-leader">–</span>
+          <span class="flow-sub" id="flow-leader-addr">&nbsp;</span>
+        </li>
+      </ol>
+      <p class="route-note" id="route-note" hidden></p>
+      <div class="route-members" id="route-members"></div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="slots-title">
+    <div class="panel-head">
+      <h2 id="slots-title">Slot ownership</h2>
+      <p class="panel-sub">Every hash slot has exactly one owning shard. Width is the share of the keyspace.</p>
+    </div>
+    <div class="slotbar" id="slotbar" role="img" aria-label="Slot ownership by shard"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="panel" aria-labelledby="shards-title">
+    <div class="panel-head">
+      <h2 id="shards-title">Shards &amp; their nodes</h2>
+      <p class="panel-sub">One Raft group per shard. The crowned node is the elected leader; followers replicate from it.</p>
+    </div>
+    <div class="shard-grid" id="shard-grid"></div>
+  </section>
+
+  <section class="panel" id="migrations-panel" aria-labelledby="mig-title" hidden>
+    <div class="panel-head">
+      <h2 id="mig-title">Slots in migration</h2>
+      <p class="panel-sub">Writes to these slots are rejected with a retry hint until the copy finishes.</p>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Slot</th><th>From</th><th>To</th><th>State</th></tr></thead>
+        <tbody id="migrations-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="nodes-title">
+    <div class="panel-head">
+      <h2 id="nodes-title">Nodes</h2>
+      <p class="panel-sub">Each node is probed directly; a node can host more than one shard.</p>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>Node</th><th>Address</th><th>Health</th><th>Hosted shards</th><th>Topology</th><th class="num">Probe</th></tr>
+        </thead>
+        <tbody id="nodes-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span>go-redis-raft</span>
+  <span id="error-line" class="error-line"></span>
+</footer>
+
+<script src="dashboard.js"></script>
+</body>
+</html>

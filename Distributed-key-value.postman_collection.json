@@ -1,0 +1,70 @@
+{
+  "info": {
+    "_postman_id": "c5044fbf-df76-401e-abcc-7cd1f64f45b9",
+    "name": "Distributed-key-value",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "25126155"
+  },
+  "item": [
+    {
+      "name": "localhost:6200/kv",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"cmd\": \"GET\",\n    \"args\": {\n        \"key\": \"user:1\"\n    }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "localhost:6200/kv",
+          "host": [
+            "localhost"
+          ],
+          "port": "6200",
+          "path": [
+            "kv"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "localhost:6200/kv",
+      "request": {
+        "auth": {
+          "type": "noauth"
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n    \"cmd\": \"SET\",\n    \"args\": {\n        \"key\": \"user:1\",\n        \"value\": \"23413\"\n    }\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "localhost:6200/kv",
+          "host": [
+            "localhost"
+          ],
+          "port": "6200",
+          "path": [
+            "kv"
+          ]
+        }
+      },
+      "response": []
+    }
+  ]
+}

@@ -1,0 +1,142 @@
+x-shards: &shards >-
+  shard-0:node1=http://node1:5000,node2=http://node2:5000,node3=http://node3:5000;
+  shard-1:node4=http://node4:5000,node5=http://node5:5000,node6=http://node6:5000
+
+x-node: &node
+  build: .
+  networks:
+    - raft-network
+  healthcheck:
+    test: ["CMD", "wget", "-q", "--spider", "http://localhost:5000/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+  command: ["./raft-redis", "redis"]
+
+services:
+  node1:
+    <<: *node
+    container_name: multiraft-node1
+    ports: ["5001:5000"]
+    environment:
+      NODE: node1
+      PORT: "5000"
+      ADVERTISE: http://node1:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node1-data:/data"]
+
+  node2:
+    <<: *node
+    container_name: multiraft-node2
+    ports: ["5002:5000"]
+    environment:
+      NODE: node2
+      PORT: "5000"
+      ADVERTISE: http://node2:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node2-data:/data"]
+
+  node3:
+    <<: *node
+    container_name: multiraft-node3
+    ports: ["5003:5000"]
+    environment:
+      NODE: node3
+      PORT: "5000"
+      ADVERTISE: http://node3:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node3-data:/data"]
+
+  node4:
+    <<: *node
+    container_name: multiraft-node4
+    ports: ["5004:5000"]
+    environment:
+      NODE: node4
+      PORT: "5000"
+      ADVERTISE: http://node4:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node4-data:/data"]
+
+  node5:
+    <<: *node
+    container_name: multiraft-node5
+    ports: ["5005:5000"]
+    environment:
+      NODE: node5
+      PORT: "5000"
+      ADVERTISE: http://node5:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node5-data:/data"]
+
+  node6:
+    <<: *node
+    container_name: multiraft-node6
+    ports: ["5006:5000"]
+    environment:
+      NODE: node6
+      PORT: "5000"
+      ADVERTISE: http://node6:5000
+      SHARDS: *shards
+      SLOTS: "16384"
+      DATA_DIR: /data
+    volumes: ["node6-data:/data"]
+
+  proxy:
+    build: .
+    container_name: multiraft-proxy
+    networks: [raft-network]
+    ports: ["6200:5200"]
+    environment:
+      PROXY_ID: proxy1
+      PORT: "5200"
+      SEEDS: http://node1:5000,http://node2:5000,http://node4:5000
+      TOPOLOGY_REFRESH: 5s
+      DATA_DIR: /data
+    volumes: ["proxy1-data:/data"]
+    command: ["./raft-redis", "proxy"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5200/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on: [node1, node4]
+
+  dashboard:
+    build: .
+    container_name: multiraft-dashboard
+    networks: [raft-network]
+    ports: ["6600:5100"]
+    environment:
+      PORT: "5100"
+      SEEDS: http://node1:5000,http://node2:5000,http://node4:5000
+    command: ["./raft-redis", "dashboard"]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5100/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on: [node1, node4]
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
+  node6-data:
+  proxy1-data:
+
+networks:
+  raft-network:
+    driver: bridge
