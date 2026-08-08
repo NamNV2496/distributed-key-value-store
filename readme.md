@@ -13,6 +13,10 @@ Access UI
 http://localhost:6600/dashboard/
 ```
 
+Command proxy host
+```
+localhost:6200/kv
+```
 
 ## Architecture
 
@@ -141,47 +145,6 @@ and commits on its own.
 - **Rebalancing** — a consistent hash ring with virtual nodes and a bounded load
   cap assigns slots to shards, so adding or removing a shard moves close to its
   fair share of slots and leaves the rest untouched.
-
-### The routed API
-
-`POST /kv` is the one endpoint a client needs. It hashes the command's key,
-finds the shard that owns the slot, and runs the command there — locally if this
-node hosts the shard, over HTTP if it does not.
-
-```bash
-curl -sX POST localhost:5001/kv \
-  -d '{"cmd":"SET","args":{"key":"user:7","value":"alice"}}'
-# {"node_id":"node1","shard":"shard-0","slot":9279,"command":"SET",
-#  "status":"success","result":"OK","topology_version":1,"served_by":"node1"}
-
-# any node answers for any key
-curl -sX POST localhost:5004/kv -d '{"cmd":"GET","args":{"key":"user:7"}}'
-
-# ?redirect=1 returns the owning shard instead of proxying, for a client
-# that wants to cache the slot map itself (Redis Cluster's MOVED)
-curl -sX POST 'localhost:5001/kv?redirect=1' -d '{"cmd":"GET","args":{"key":"user:7"}}'
-```
-
-### Rebalancing the hash ring
-
-```bash
-# where would a key go, and what does the map look like now
-curl -s 'localhost:5001/cluster/locate?key=user:7'
-curl -s localhost:5001/cluster/shards
-
-# preview: what would adding a shard move?
-curl -sX POST 'localhost:5001/cluster/rebalance?dry_run=1' \
-  -d '{"shards":[ ...full desired shard set... ]}'
-
-# add a shard and migrate its slots to it
-curl -sX POST localhost:5001/cluster/shards -d '{
-  "action":"add","shard":"shard-2",
-  "members":{"node1":"http://node1:5000","node4":"http://node4:5000","node6":"http://node6:5000"}
-}'
-
-# drain and remove one
-curl -sX POST localhost:5001/cluster/shards -d '{"action":"remove","shard":"shard-2"}'
-```
 
 ### Routing tier as its own service (`proxy` command)
 
